@@ -31,6 +31,15 @@ Then do:
 
 `pip install -e .`
 
+You can also install using [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv venv
+uv pip install .          # standard install
+uv pip install -e .       # editable install
+uv pip install ".[test]"  # with optional extras (test, ffd, mphys, all)
+```
+
 Documentation
 -------------
 
