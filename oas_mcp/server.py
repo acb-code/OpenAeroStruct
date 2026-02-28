@@ -40,11 +40,38 @@ from .core.validators import (
 
 mcp = FastMCP(
     "OpenAeroStruct",
-    instructions=(
-        "Aerostructural analysis and optimization of aircraft wings using OpenAeroStruct. "
-        "Start by calling create_surface to define one or more lifting surfaces, then call "
-        "run_aero_analysis or run_aerostruct_analysis to compute performance metrics."
-    ),
+    instructions="""OpenAeroStruct aerostructural analysis and optimisation server.
+
+REQUIRED WORKFLOW — always follow this order:
+  1. create_surface  — define geometry (call once per surface; must precede any analysis)
+  2. run_aero_analysis / run_aerostruct_analysis / compute_drag_polar / etc. — analyse
+  3. run_optimization (optional) — optimise design variables
+  4. reset (optional) — clear state between unrelated experiments
+
+CRITICAL CONSTRAINTS:
+  • num_y must be ODD (3, 5, 7, 9, …). Passing an even value raises an error.
+  • Structural tools (run_aerostruct_analysis, and aerostruct optimization) require
+    create_surface to have been called with fem_model_type="tube" or "wingbox" plus
+    material properties (E, G, yield_stress, mrho). Aero-only surfaces will error.
+  • Surface names are arbitrary strings but must match exactly between create_surface
+    and analysis calls.
+
+PARAMETER TIPS:
+  • Cruise conditions: velocity=248 m/s, Mach_number=0.84, density=0.38 kg/m³, re=1e6
+  • Good starting mesh: num_x=2, num_y=7 (fast); use num_y=15 for higher fidelity
+  • wing_type="CRM" produces a realistic transport wing with built-in twist;
+    wing_type="rect" produces a flat untwisted planform — simpler but less realistic
+  • failure < 0 means no structural failure; failure > 0 means the structure has failed
+  • L_equals_W residual near 0 means the wing is sized to carry the aircraft weight
+
+PERFORMANCE:
+  • The first run_aero_analysis call builds and sets up the OpenMDAO problem (~0.1 s).
+    Subsequent calls with the same surfaces reuse the cached problem — only the flight
+    conditions change, so parameter sweeps are very fast.
+  • Calling create_surface again with the same name invalidates the cache.
+
+Use the prompts (analyze_wing, aerostructural_design, optimize_wing) for guided
+workflows, and the resources (oas://reference, oas://workflows) for quick lookup.""",
 )
 
 _sessions = SessionManager()
@@ -692,6 +719,372 @@ async def reset(
         session = _sessions.get(session_id)
         session.clear()
         return {"status": f"Session '{session_id}' reset", "cleared": session_id}
+
+
+# ---------------------------------------------------------------------------
+# Resources — reference material the LLM can read on demand
+# ---------------------------------------------------------------------------
+
+_REFERENCE = """\
+# OpenAeroStruct MCP — quick reference
+
+## Workflow order (mandatory)
+  create_surface → run_aero_analysis | run_aerostruct_analysis
+                 → compute_drag_polar | compute_stability_derivatives
+                 → run_optimization
+  reset  (clears all state)
+
+## create_surface — key parameters
+  name          str      Surface identifier used in all other tools
+  wing_type     str      "rect" (flat, no twist) | "CRM" (transport planform with twist)
+  span          float    Full wingspan in metres (default 10.0)
+  root_chord    float    Root chord in metres (default 1.0)
+  num_x         int      Chordwise nodes, >= 2 (default 2)
+  num_y         int      Spanwise nodes, ODD, >= 3 (default 7)
+  symmetry      bool     True = model half-span (recommended, default True)
+  sweep         float    Leading-edge sweep, degrees (default 0)
+  dihedral      float    Dihedral angle, degrees (default 0)
+  taper         float    Taper ratio tip/root chord (default 1.0 = no taper)
+  twist_cp      float[]  Twist control points, degrees (None = zero twist)
+  t_over_c_cp   float[]  Thickness/chord control points (default [0.15])
+  with_viscous  bool     Include viscous drag (default True)
+  with_wave     bool     Include wave drag (default False)
+  CD0           float    Zero-lift profile drag added to total (default 0.015)
+  fem_model_type str|None "tube" | "wingbox" | None  — enables structural analysis
+  E             float    Young's modulus, Pa (default 70e9 = Al 7075)
+  G             float    Shear modulus, Pa (default 30e9 = Al 7075)
+  yield_stress  float    Yield stress, Pa (default 500e6)
+  safety_factor float    Safety factor on yield (default 2.5)
+  mrho          float    Material density, kg/m³ (default 3000 = Al 7075)
+  thickness_cp  float[]  Tube thickness control points, m (default 0.1*root_chord)
+  offset        float[3] [x,y,z] origin offset in metres (e.g. tail: [50,0,0])
+
+## Typical flight conditions (cruise, ~FL350)
+  velocity=248.136 m/s  Mach_number=0.84  density=0.38 kg/m³
+  reynolds_number=1e6   speed_of_sound=295.4 m/s
+
+## run_aero_analysis — returns
+  CL, CD, CM, L_over_D
+  surfaces.{name}.{CL, CD, CDi, CDv, CDw}
+
+## run_aerostruct_analysis — returns (all of aero plus)
+  fuelburn kg, structural_mass kg, L_equals_W (residual, 0=trimmed)
+  surfaces.{name}.{failure, max_vonmises_Pa, structural_mass_kg}
+  failure < 0  →  safe;  failure > 0  →  structural failure
+
+## compute_drag_polar — returns
+  alpha_deg[], CL[], CD[], CM[], L_over_D[]
+  best_L_over_D.{alpha_deg, CL, CD, L_over_D}
+
+## compute_stability_derivatives — returns
+  CL_alpha (1/deg), CM_alpha (1/deg), static_margin, stability (string)
+  static_margin = -CM_alpha/CL_alpha;  positive = statically stable
+
+## run_optimization — design variable names
+  twist, thickness, chord, sweep, taper, alpha
+  spar_thickness, skin_thickness  (wingbox only)
+
+## run_optimization — constraint names
+  aero:        CL, CD, CM
+  aerostruct:  CL, CD, CM, failure, thickness_intersects, L_equals_W
+
+## run_optimization — objective names
+  aero:        CD, CL
+  aerostruct:  fuelburn, structural_mass, CD
+
+## Common errors and fixes
+  "num_y must be odd"           → change num_y to nearest odd number
+  "missing structural props"    → re-create surface with fem_model_type="tube"
+  "Surface not found"           → call create_surface first with that exact name
+  "Unknown design variable"     → check spelling against the DV list above
+"""
+
+_WORKFLOWS = """\
+# OpenAeroStruct MCP — step-by-step workflows
+
+---
+## Workflow A — aerodynamic analysis of a new wing
+
+Goal: characterise CL, CD, L/D of a wing at cruise.
+
+Step 1 — define the geometry:
+  create_surface(
+      name="wing", wing_type="CRM",
+      num_x=2, num_y=7, symmetry=True,
+      with_viscous=True, CD0=0.015
+  )
+
+Step 2 — single-point cruise analysis:
+  run_aero_analysis(
+      surfaces=["wing"],
+      velocity=248.136, alpha=5.0,
+      Mach_number=0.84, density=0.38
+  )
+
+Step 3 — drag polar to find best L/D:
+  compute_drag_polar(
+      surfaces=["wing"],
+      alpha_start=0.0, alpha_end=12.0, num_alpha=13,
+      Mach_number=0.84, density=0.38
+  )
+  → inspect best_L_over_D to find operating point
+
+Step 4 (optional) — stability check:
+  compute_stability_derivatives(
+      surfaces=["wing"],
+      alpha=5.0, Mach_number=0.84, density=0.38,
+      cg=[<x_cg>, 0, 0]   # x_cg in metres from leading edge
+  )
+
+---
+## Workflow B — aerostructural sizing
+
+Goal: check whether a wing structure can carry the aerodynamic loads at cruise,
+and compute mission fuel burn.
+
+Step 1 — define wing with structural properties:
+  create_surface(
+      name="wing", wing_type="CRM",
+      num_x=2, num_y=7, symmetry=True,
+      with_viscous=True, CD0=0.015,
+      fem_model_type="tube",
+      E=70e9, G=30e9, yield_stress=500e6, safety_factor=2.5, mrho=3000.0
+  )
+
+Step 2 — coupled aerostructural analysis:
+  run_aerostruct_analysis(
+      surfaces=["wing"],
+      velocity=248.136, alpha=5.0,
+      Mach_number=0.84, density=0.38,
+      W0=120000,         # aircraft empty weight excl. wing, kg
+      R=11.165e6,        # mission range, m
+      speed_of_sound=295.4, load_factor=1.0
+  )
+
+Step 3 — interpret results:
+  • failure < 0  →  structure is safe at this load
+  • failure > 0  →  increase thickness_cp values or reduce load_factor
+  • L_equals_W ≈ 0  →  wing is sized for aircraft weight; large residual means
+    alpha or W0 needs adjustment
+  • fuelburn / structural_mass are the primary sizing metrics
+
+---
+## Workflow C — aerodynamic optimisation
+
+Goal: minimise drag at a fixed lift coefficient by varying twist and alpha.
+
+Step 1 — define geometry (aero-only surface is fine):
+  create_surface(
+      name="wing", wing_type="CRM",
+      num_x=2, num_y=7, symmetry=True,
+      with_viscous=True, CD0=0.015
+  )
+
+Step 2 — run optimisation:
+  run_optimization(
+      surfaces=["wing"],
+      analysis_type="aero",
+      objective="CD",
+      design_variables=[
+          {"name": "twist", "lower": -10.0, "upper": 15.0},
+          {"name": "alpha", "lower": -5.0,  "upper": 15.0}
+      ],
+      constraints=[{"name": "CL", "equals": 0.5}],
+      Mach_number=0.84, density=0.38
+  )
+
+Step 3 — check result:
+  • success=True and final_results.CL ≈ 0.5  →  converged
+  • success=False  →  try wider DV bounds or a different starting alpha
+
+---
+## Workflow D — aerostructural optimisation (minimum fuel burn)
+
+Step 1 — define wing with structural properties (see Workflow B, Step 1)
+
+Step 2:
+  run_optimization(
+      surfaces=["wing"],
+      analysis_type="aerostruct",
+      objective="fuelburn",
+      design_variables=[
+          {"name": "twist",     "lower": -10.0, "upper": 15.0},
+          {"name": "thickness", "lower":  0.003, "upper": 0.25,  "scaler": 1e2},
+          {"name": "alpha",     "lower":  -5.0,  "upper": 10.0}
+      ],
+      constraints=[
+          {"name": "L_equals_W",  "equals": 0.0},
+          {"name": "failure",     "upper":  0.0},
+          {"name": "thickness_intersects", "upper": 0.0}
+      ],
+      W0=120000, R=11.165e6, Mach_number=0.84, density=0.38
+  )
+
+---
+## Workflow E — multi-surface (wing + tail)
+
+Step 1 — create both surfaces:
+  create_surface(name="wing", wing_type="CRM", num_x=2, num_y=7, ...)
+  create_surface(name="tail", wing_type="rect", span=6.0, root_chord=1.5,
+                 num_x=2, num_y=5, offset=[20.0, 0.0, 0.0],
+                 CD0=0.0, CL0=0.0)
+
+Step 2 — analyse both together:
+  run_aero_analysis(surfaces=["wing", "tail"], ...)
+  compute_drag_polar(surfaces=["wing", "tail"], ...)
+
+  Trimmed stability (CM=0) requires adjusting the tail incidence angle
+  (twist_cp on the tail) until CM ≈ 0 at the desired operating CL.
+"""
+
+
+@mcp.resource("oas://reference", description="Parameter reference for all OAS MCP tools")
+def reference_guide() -> str:
+    return _REFERENCE
+
+
+@mcp.resource("oas://workflows", description="Step-by-step workflows for common analysis tasks")
+def workflow_guide() -> str:
+    return _WORKFLOWS
+
+
+# ---------------------------------------------------------------------------
+# Prompts — workflow templates that seed the agent with goal + context
+# ---------------------------------------------------------------------------
+
+
+@mcp.prompt(
+    name="analyze_wing",
+    description="Set up and run a complete aerodynamic wing analysis (aero + drag polar + stability)",
+)
+def prompt_analyze_wing(
+    wing_type: str = "CRM",
+    span: str = "default",
+    target_CL: str = "0.5",
+    Mach: str = "0.84",
+) -> str:
+    span_note = "" if span == "default" else f" with a span of {span} m"
+    return f"""\
+Analyse a {wing_type} wing{span_note} at Mach {Mach} and find the operating point \
+that achieves CL ≈ {target_CL}.
+
+Follow these steps using the OpenAeroStruct tools:
+
+1. Call create_surface to define the wing geometry.
+   Use wing_type="{wing_type}", num_x=2, num_y=7, symmetry=True, with_viscous=True.
+   {"" if span == "default" else f"Set span={span}."}
+
+2. Call run_aero_analysis at a starting alpha (try alpha=5.0) to get a baseline CL/CD/L_D.
+
+3. Call compute_drag_polar with alpha_start=-2.0, alpha_end=12.0, num_alpha=15 \
+to map out the full polar and find the alpha that gives CL≈{target_CL}.
+
+4. Call compute_stability_derivatives at the operating alpha. \
+Set cg to approximately 25% of the mean chord ahead of the aerodynamic centre \
+to check whether the configuration is statically stable.
+
+5. Report: operating alpha, CL, CD, L/D, CL_alpha, static margin, \
+and whether the configuration is statically stable.
+"""
+
+
+@mcp.prompt(
+    name="aerostructural_design",
+    description="Run a coupled aerostructural analysis and interpret structural health",
+)
+def prompt_aerostructural_design(
+    W0_kg: str = "120000",
+    load_factor: str = "2.5",
+    material: str = "aluminum",
+) -> str:
+    material_props = {
+        "aluminum":   "E=70e9, G=30e9, yield_stress=500e6, mrho=3000.0",
+        "titanium":   "E=114e9, G=42e9, yield_stress=950e6, mrho=4430.0",
+        "composite":  "E=70e9, G=30e9, yield_stress=900e6, mrho=1600.0",
+    }.get(material, "E=70e9, G=30e9, yield_stress=500e6, mrho=3000.0")
+
+    return f"""\
+Size a wing structure for an aircraft with empty weight W0={W0_kg} kg using \
+{material} material properties, at a load factor of {load_factor}.
+
+Follow these steps:
+
+1. Call create_surface with fem_model_type="tube" and material properties:
+   {material_props}, safety_factor=2.5
+   Use wing_type="CRM", num_x=2, num_y=7, symmetry=True, with_viscous=True, CD0=0.015.
+
+2. Call run_aerostruct_analysis with:
+   W0={W0_kg}, load_factor={load_factor}, Mach_number=0.84, density=0.38,
+   velocity=248.136, R=11.165e6, speed_of_sound=295.4
+
+3. Interpret the results:
+   • failure < 0  →  structure is safe (report the margin)
+   • failure > 0  →  structure has failed; the design needs thicker skins
+   • L_equals_W residual: if |L_equals_W| > 0.1, note that alpha or W0 may need adjustment
+   • Report structural_mass, fuelburn, and the failure metric.
+
+4. If failure > 0, call run_optimization with objective="fuelburn",
+   design_variables=[thickness (lower=0.003, upper=0.25), alpha, twist],
+   constraints=[L_equals_W=0, failure<=0, thickness_intersects<=0]
+   to find the minimum-weight feasible structure.
+"""
+
+
+@mcp.prompt(
+    name="optimize_wing",
+    description="Optimise wing twist and/or thickness for minimum drag or fuel burn",
+)
+def prompt_optimize_wing(
+    objective: str = "CD",
+    target_CL: str = "0.5",
+    analysis_type: str = "aero",
+) -> str:
+    struct_note = ""
+    dv_list = '[{"name":"twist","lower":-10,"upper":15}, {"name":"alpha","lower":-5,"upper":15}]'
+    con_list = f'[{{"name":"CL","equals":{target_CL}}}]'
+
+    if analysis_type == "aerostruct":
+        struct_note = (
+            "Use fem_model_type='tube', E=70e9, G=30e9, yield_stress=500e6, "
+            "safety_factor=2.5, mrho=3000.0 in create_surface.\n   "
+        )
+        dv_list = (
+            '[{"name":"twist","lower":-10,"upper":15},'
+            '{"name":"thickness","lower":0.003,"upper":0.25,"scaler":100},'
+            '{"name":"alpha","lower":-5,"upper":15}]'
+        )
+        con_list = (
+            '[{"name":"L_equals_W","equals":0},'
+            '{"name":"failure","upper":0},'
+            '{"name":"thickness_intersects","upper":0}]'
+        )
+
+    return f"""\
+Optimise a wing for minimum {objective} subject to CL={target_CL} \
+using a {analysis_type} analysis.
+
+Follow these steps:
+
+1. Call create_surface:
+   {struct_note}Use wing_type="CRM", num_x=2, num_y=7, symmetry=True, \
+with_viscous=True, CD0=0.015.
+
+2. (Optional but recommended) Call run_aero_analysis at alpha=5.0 to get a \
+baseline CL/CD before optimisation.
+
+3. Call run_optimization with:
+   analysis_type="{analysis_type}"
+   objective="{objective}"
+   design_variables={dv_list}
+   constraints={con_list}
+   Mach_number=0.84, density=0.38, velocity=248.136
+
+4. Report:
+   • success (True/False)
+   • optimised DV values (twist distribution and alpha)
+   • final CL, CD, and {"fuelburn" if objective == "fuelburn" else "L/D"}
+   • improvement vs. the baseline from step 2
+"""
 
 
 # ---------------------------------------------------------------------------

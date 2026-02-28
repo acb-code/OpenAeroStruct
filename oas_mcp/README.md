@@ -5,6 +5,7 @@ An [MCP](https://modelcontextprotocol.io) server that wraps [OpenAeroStruct](htt
 ## Contents
 
 - [Overview](#overview)
+- [How agents learn to use the server](#how-agents-learn-to-use-the-server)
 - [Installation](#installation)
 - [Running the server](#running-the-server)
 - [Running the tests](#running-the-tests)
@@ -35,6 +36,88 @@ Setting up an OpenAeroStruct analysis normally requires 50–100 lines of OpenMD
 - **Stateful sessions** — surfaces are stored by name; call `create_surface` once, then run analyses repeatedly.
 - **Problem caching** — `om.Problem.setup()` is expensive. The server runs it once per unique geometry and reuses the cached problem for parameter sweeps, making repeated `run_aero_analysis` calls with different alpha/Mach values fast.
 - **Async** — all OpenMDAO computation runs in `asyncio.to_thread()` so the event loop stays responsive.
+
+---
+
+## How agents learn to use the server
+
+MCP provides three built-in mechanisms for conveying knowledge to an LLM or agent. The server uses all three layers:
+
+### Layer 1 — Server instructions (automatic, always-on)
+
+The `instructions` field on the `FastMCP` instance is sent to the LLM when the server connects. It covers:
+
+- The mandatory workflow order (`create_surface` → analysis → optimisation)
+- Hard constraints that cause errors if violated (odd `num_y`, structural properties required for aerostruct)
+- Sensible default parameter values for cruise flight conditions
+- A note about performance (problem caching)
+
+This is the first thing an agent sees — it sets the framing without requiring any user action.
+
+### Layer 2 — Prompts (invokable workflows)
+
+MCP prompts are named templates that encode "how to accomplish goal X" rather than "what does tool Y do". They accept arguments and return a user message that seeds the conversation with a fully specified plan. The server exposes three:
+
+| Prompt | Arguments | What it produces |
+|--------|-----------|-----------------|
+| `analyze_wing` | `wing_type`, `target_CL`, `Mach`, `span` | Step-by-step plan: create → single-point → drag polar → stability check |
+| `aerostructural_design` | `W0_kg`, `load_factor`, `material` | Plan including material properties, structural interpretation guide, fallback to optimisation if structure fails |
+| `optimize_wing` | `objective`, `target_CL`, `analysis_type` | Plan with correctly formatted DV/constraint dicts for the chosen objective and analysis type |
+
+In **Claude Desktop**, prompts appear in the `+` attachment menu and can be invoked by the user as conversation starters. In **agentic pipelines**, the orchestrator calls `prompts/get` to retrieve the message and prepends it to the agent's context.
+
+The prompts adapt their content to their arguments — for example, `optimize_wing` with `analysis_type="aerostruct"` automatically switches to fuel-burn objective options, adds `thickness` to the DV list, and adds `failure` and `L_equals_W` constraints.
+
+### Layer 3 — Resources (on-demand reference material)
+
+Resources are URI-addressable documents the LLM can read when it needs detail. They keep individual tool docstrings short while making full documentation available.
+
+| URI | Content |
+|-----|---------|
+| `oas://reference` | Parameter tables for all tools, valid value lists, return-value schemas, common errors and fixes |
+| `oas://workflows` | Five complete step-by-step workflows (aero analysis, aerostructural sizing, aero optimisation, aerostructural optimisation, multi-surface wing+tail) |
+
+An agent can read these proactively at the start of a session (`resources/read`) or reactively when it encounters an unfamiliar parameter or error.
+
+### What this means in practice
+
+For a typical Claude Desktop session:
+
+1. The user connects to the server — Claude receives `instructions` automatically.
+2. The user picks a prompt (e.g. `analyze_wing`) from the attachment menu.
+3. Claude receives a fully detailed plan and starts calling tools to execute it.
+4. If Claude encounters an error or unfamiliar parameter, it reads `oas://reference`.
+
+For a programmatic agent:
+
+```python
+# 1. List available prompts to understand what workflows exist
+prompts = await session.list_prompts()
+
+# 2. Get a prompt to seed the agent's task
+result = await session.get_prompt("analyze_wing", {"wing_type": "CRM", "target_CL": "0.5"})
+agent_context = result.messages[0].content.text
+
+# 3. Read reference material upfront to reduce tool-call errors
+ref = await session.read_resource("oas://reference")
+
+# 4. Run the agent with the seeded context
+await agent.run(system=server_instructions, user=agent_context + "\n\n" + ref.content)
+```
+
+### Do you need a client-side skill?
+
+A client-side skill (e.g. a Claude Code `/oas-analyze` slash command) is useful for **triggering** the right prompt — it lets a user type a short command instead of selecting from a menu. But the *knowledge* about what to do lives in the server-side prompt, not in the skill. The skill just calls `prompts/get` with the appropriate arguments.
+
+If you want to add a Claude Code skill for this server, it would look like:
+
+```markdown
+Invoke the OpenAeroStruct MCP server's `analyze_wing` prompt with the wing
+parameters the user has described, then execute each step the prompt specifies
+using the OAS tools.
+```
+
+That separation — skill triggers intent, prompt encodes workflow, tools do work — keeps the knowledge in one place (the server) and makes it available to any MCP client, not just Claude Code.
 
 ---
 
