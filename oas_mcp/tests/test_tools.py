@@ -1,0 +1,314 @@
+"""
+Integration tests for all 7 MCP tools.
+
+These run real OAS computations on small meshes (num_y=5) to verify that
+tools produce physically correct, consistent results.  Marked with
+pytest.mark.slow so they can be excluded from quick feedback loops:
+
+    pytest -m "not slow"   # unit tests only
+    pytest                 # everything
+"""
+
+import pytest
+import pytest_asyncio
+from oas_mcp.server import (
+    compute_drag_polar,
+    compute_stability_derivatives,
+    create_surface,
+    reset,
+    run_aero_analysis,
+    run_aerostruct_analysis,
+    run_optimization,
+)
+
+pytestmark = pytest.mark.slow
+
+
+# ---------------------------------------------------------------------------
+# create_surface
+# ---------------------------------------------------------------------------
+
+
+class TestCreateSurface:
+    async def test_rect_wing_summary(self, aero_wing):
+        from oas_mcp.server import _sessions
+        session = _sessions.get("default")
+        assert "wing" in session.surfaces
+        surf = session.surfaces["wing"]
+        assert surf["mesh"].shape[0] == 2  # num_x
+        assert surf["mesh"].shape[2] == 3  # x,y,z
+
+    async def test_crm_wing_has_twist(self):
+        result = await create_surface(
+            name="crm", wing_type="CRM", num_x=2, num_y=5, symmetry=True
+        )
+        from oas_mcp.server import _sessions
+        surf = _sessions.get("default").surfaces["crm"]
+        assert len(surf["twist_cp"]) >= 2
+
+    async def test_struct_wing_has_fem_properties(self):
+        await create_surface(
+            name="sw", wing_type="rect", num_x=2, num_y=5,
+            fem_model_type="tube", E=70e9, G=30e9,
+            yield_stress=500e6, safety_factor=2.5, mrho=3e3,
+        )
+        from oas_mcp.server import _sessions
+        surf = _sessions.get("default").surfaces["sw"]
+        assert surf["fem_model_type"] == "tube"
+        assert surf["E"] == 70e9
+
+    async def test_returns_surface_summary(self, aero_wing):
+        result = await create_surface(
+            name="check", wing_type="rect", num_x=2, num_y=5,
+            span=10.0, root_chord=1.0, symmetry=True,
+        )
+        assert result["surface_name"] == "check"
+        assert result["span_m"] == pytest.approx(10.0, abs=0.1)
+        assert result["has_structure"] is False
+        assert result["status"] == "Surface created successfully"
+
+    async def test_invalid_even_num_y_raises(self):
+        with pytest.raises(ValueError, match="odd"):
+            await create_surface(name="bad", num_y=6)
+
+    async def test_invalid_wing_type_raises(self):
+        with pytest.raises(ValueError, match="wing_type"):
+            await create_surface(name="bad", wing_type="ellipse")
+
+
+# ---------------------------------------------------------------------------
+# run_aero_analysis
+# ---------------------------------------------------------------------------
+
+
+class TestRunAeroAnalysis:
+    async def test_basic_results_structure(self, aero_wing):
+        r = await run_aero_analysis(["wing"])
+        assert "CL" in r
+        assert "CD" in r
+        assert "CM" in r
+        assert "L_over_D" in r
+        assert "surfaces" in r
+        assert "wing" in r["surfaces"]
+
+    async def test_cl_positive_at_positive_alpha(self, aero_wing):
+        r = await run_aero_analysis(["wing"], alpha=5.0)
+        assert r["CL"] > 0
+
+    async def test_cl_negative_at_negative_alpha(self, aero_wing):
+        r = await run_aero_analysis(["wing"], alpha=-5.0)
+        assert r["CL"] < 0
+
+    async def test_cd_always_positive(self, aero_wing):
+        for alpha in [-5.0, 0.0, 5.0]:
+            r = await run_aero_analysis(["wing"], alpha=alpha)
+            assert r["CD"] > 0, f"CD should be positive at alpha={alpha}"
+
+    async def test_cl_zero_at_zero_alpha_rect(self, aero_wing):
+        r = await run_aero_analysis(["wing"], alpha=0.0)
+        assert abs(r["CL"]) < 0.01  # rect wing, no camber → CL≈0 at α=0
+
+    async def test_cl_increases_with_alpha(self, aero_wing):
+        r1 = await run_aero_analysis(["wing"], alpha=0.0)
+        r2 = await run_aero_analysis(["wing"], alpha=5.0)
+        r3 = await run_aero_analysis(["wing"], alpha=10.0)
+        assert r1["CL"] < r2["CL"] < r3["CL"]
+
+    async def test_ld_is_cl_over_cd(self, aero_wing):
+        r = await run_aero_analysis(["wing"], alpha=5.0)
+        assert r["L_over_D"] == pytest.approx(r["CL"] / r["CD"], rel=1e-4)
+
+    async def test_missing_surface_raises(self):
+        with pytest.raises(ValueError, match="not found"):
+            await run_aero_analysis(["nonexistent"])
+
+    async def test_invalid_velocity_raises(self, aero_wing):
+        with pytest.raises(ValueError, match="velocity"):
+            await run_aero_analysis(["wing"], velocity=-1.0)
+
+    async def test_session_cache_reused(self, aero_wing):
+        from oas_mcp.server import _sessions
+        # First call stores a problem
+        await run_aero_analysis(["wing"], alpha=0.0)
+        cached_before = _sessions.get("default").get_cached_problem(["wing"], "aero")
+        assert cached_before is not None
+        # Second call should use the same cached object
+        await run_aero_analysis(["wing"], alpha=5.0)
+        cached_after = _sessions.get("default").get_cached_problem(["wing"], "aero")
+        assert cached_before is cached_after
+
+
+# ---------------------------------------------------------------------------
+# run_aerostruct_analysis
+# ---------------------------------------------------------------------------
+
+
+class TestRunAerostructAnalysis:
+    async def test_basic_results_structure(self, struct_wing):
+        r = await run_aerostruct_analysis(["wing"])
+        assert "CL" in r
+        assert "CD" in r
+        assert "fuelburn" in r
+        assert "structural_mass" in r
+        assert "L_equals_W" in r
+
+    async def test_structural_mass_positive(self, struct_wing):
+        r = await run_aerostruct_analysis(["wing"])
+        assert r["structural_mass"] > 0
+
+    async def test_fuelburn_positive(self, struct_wing):
+        r = await run_aerostruct_analysis(["wing"])
+        assert r["fuelburn"] > 0
+
+    async def test_failure_in_surface_results(self, struct_wing):
+        r = await run_aerostruct_analysis(["wing"])
+        assert "failure" in r["surfaces"]["wing"]
+
+    async def test_no_struct_props_raises(self, aero_wing):
+        with pytest.raises(ValueError, match="structural"):
+            await run_aerostruct_analysis(["wing"])
+
+    async def test_cl_positive_at_positive_alpha(self, struct_wing):
+        r = await run_aerostruct_analysis(["wing"], alpha=5.0)
+        assert r["CL"] > 0
+
+
+# ---------------------------------------------------------------------------
+# compute_drag_polar
+# ---------------------------------------------------------------------------
+
+
+class TestComputeDragPolar:
+    async def test_result_arrays_same_length(self, aero_wing):
+        dp = await compute_drag_polar(["wing"], alpha_start=-5.0, alpha_end=10.0, num_alpha=4)
+        n = len(dp["alpha_deg"])
+        assert len(dp["CL"]) == n
+        assert len(dp["CD"]) == n
+        assert len(dp["CM"]) == n
+        assert len(dp["L_over_D"]) == n
+
+    async def test_cl_monotonically_increasing(self, aero_wing):
+        dp = await compute_drag_polar(["wing"], alpha_start=-5.0, alpha_end=10.0, num_alpha=4)
+        cls = dp["CL"]
+        assert all(cls[i] < cls[i + 1] for i in range(len(cls) - 1))
+
+    async def test_cd_parabolic_minimum_at_mid_alpha(self, aero_wing):
+        dp = await compute_drag_polar(["wing"], alpha_start=-5.0, alpha_end=10.0, num_alpha=5)
+        cds = dp["CD"]
+        # CD should decrease then increase (parabolic) — min not at endpoints
+        min_idx = cds.index(min(cds))
+        assert 0 < min_idx < len(cds) - 1
+
+    async def test_best_ld_keys(self, aero_wing):
+        dp = await compute_drag_polar(["wing"], alpha_start=0.0, alpha_end=10.0, num_alpha=3)
+        best = dp["best_L_over_D"]
+        assert "alpha_deg" in best
+        assert "CL" in best
+        assert "CD" in best
+        assert "L_over_D" in best
+        assert isinstance(best["alpha_deg"], float)  # no np.float64 leakage
+
+    async def test_num_alpha_respected(self, aero_wing):
+        dp = await compute_drag_polar(["wing"], num_alpha=6)
+        assert len(dp["alpha_deg"]) == 6
+
+
+# ---------------------------------------------------------------------------
+# compute_stability_derivatives
+# ---------------------------------------------------------------------------
+
+
+class TestComputeStabilityDerivatives:
+    async def test_result_keys(self, aero_wing):
+        sd = await compute_stability_derivatives(["wing"])
+        assert "CL_alpha" in sd
+        assert "CM_alpha" in sd
+        assert "static_margin" in sd
+        assert "stability" in sd
+
+    async def test_cl_alpha_positive(self, aero_wing):
+        sd = await compute_stability_derivatives(["wing"])
+        assert sd["CL_alpha"] > 0, "CL_alpha should be positive for a lifting surface"
+
+    async def test_stability_string_reflects_sign(self, aero_wing):
+        sd = await compute_stability_derivatives(["wing"], cg=[0.5, 0.0, 0.0])
+        sm = sd["static_margin"]
+        if sm > 0.05:
+            assert "stable" in sd["stability"]
+        elif sm > 0:
+            assert "marginally" in sd["stability"]
+        else:
+            assert "unstable" in sd["stability"]
+
+
+# ---------------------------------------------------------------------------
+# run_optimization
+# ---------------------------------------------------------------------------
+
+
+class TestRunOptimization:
+    async def test_cl_constraint_satisfied(self, aero_wing):
+        result = await run_optimization(
+            surfaces=["wing"],
+            analysis_type="aero",
+            objective="CD",
+            design_variables=[{"name": "alpha", "lower": -10.0, "upper": 15.0}],
+            constraints=[{"name": "CL", "equals": 0.5}],
+        )
+        assert result["success"] is True
+        assert result["final_results"]["CL"] == pytest.approx(0.5, abs=1e-3)
+
+    async def test_result_structure(self, aero_wing):
+        result = await run_optimization(
+            surfaces=["wing"],
+            analysis_type="aero",
+            objective="CD",
+            design_variables=[{"name": "alpha", "lower": -5.0, "upper": 15.0}],
+            constraints=[{"name": "CL", "equals": 0.3}],
+        )
+        assert "success" in result
+        assert "optimized_design_variables" in result
+        assert "final_results" in result
+
+    async def test_unknown_dv_raises(self, aero_wing):
+        with pytest.raises(ValueError, match="Unknown design variable"):
+            await run_optimization(
+                surfaces=["wing"],
+                design_variables=[{"name": "magic_param"}],
+                constraints=[{"name": "CL", "equals": 0.5}],
+            )
+
+    async def test_unknown_constraint_raises(self, aero_wing):
+        with pytest.raises(ValueError, match="Unknown constraint"):
+            await run_optimization(
+                surfaces=["wing"],
+                design_variables=[{"name": "alpha", "lower": -5.0, "upper": 15.0}],
+                constraints=[{"name": "mystery_output", "equals": 0.0}],
+            )
+
+
+# ---------------------------------------------------------------------------
+# reset
+# ---------------------------------------------------------------------------
+
+
+class TestReset:
+    async def test_reset_all_clears_surfaces(self, aero_wing):
+        from oas_mcp.server import _sessions
+        assert "wing" in _sessions.get("default").surfaces
+        await reset()
+        assert len(_sessions.get("default").surfaces) == 0
+
+    async def test_reset_specific_session(self, aero_wing):
+        from oas_mcp.server import _sessions
+        _sessions.get("other").add_surface({"name": "x", "mesh": None})
+        await reset(session_id="default")
+        assert len(_sessions.get("default").surfaces) == 0
+        assert "x" in _sessions.get("other").surfaces
+
+    async def test_reset_returns_status(self):
+        r = await reset()
+        assert r["cleared"] == "all"
+
+        r2 = await reset(session_id="default")
+        assert r2["cleared"] == "default"

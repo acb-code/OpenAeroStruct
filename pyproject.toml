@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openaerostruct"
+dynamic = ["version"]
+description = "OpenAeroStruct"
+readme = "README.md"
+license = { text = "BSD-3" }
+requires-python = ">=3.8"
+authors = []
+keywords = []
+dependencies = [
+    "openmdao>=3.35,!=3.40",
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+docs  = ["sphinx_mdolab_theme"]
+test  = ["testflo"]
+ffd   = ["pygeo>=1.6.0"]
+mphys = ["mphys>=2.0.0", "pygeo>=1.15.0"]
+mcp   = ["mcp[cli]>=1.0"]
+all   = ["mphys>=2.0.0", "pygeo>=1.15.0", "sphinx_mdolab_theme", "testflo", "mcp[cli]>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/mdolab/OpenAeroStruct"
+
+[project.scripts]
+plot_wing    = "openaerostruct.utils.plot_wing:disp_plot"
+plot_wingbox = "openaerostruct.utils.plot_wingbox:disp_plot"
+oas-mcp      = "oas_mcp.server:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "openaerostruct.__version__" }
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["openaerostruct*", "oas_mcp*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths   = ["oas_mcp/tests"]
+markers     = ["slow: integration tests that run real OAS computations (deselect with -m 'not slow')"]
+addopts     = "-v"
+
+[tool.setuptools.package-data]
+openaerostruct = ["tests/*.py", "*/tests/*.py", "*/*/tests/*.py"]
