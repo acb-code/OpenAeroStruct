@@ -232,42 +232,18 @@ curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8000/mcp \
 
 ## 8. Connect Claude Desktop with auth
 
-Claude Desktop uses stdio transport natively. To reach an HTTP server with authentication, use `mcp-remote` as a bridge.
+Claude Desktop (≥ 0.10) supports remote HTTP MCP servers directly via a `"url"`
+key in the config — no `mcp-remote` bridge needed. This is the recommended
+approach and mirrors how cloud deployments work.
 
-### Step 1 — Get `mcp-remote`
-
-```bash
-npm install -g mcp-remote
-# or use npx to avoid a global install (slower first run)
-```
-
-### Step 2 — Edit `claude_desktop_config.json`
-
-Location:
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-**Without auth header (server is public / no Keycloak):**
-
-```json
-{
-  "mcpServers": {
-    "openaerostruct": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"]
-    }
-  }
-}
-```
-
-**With a static Bearer token (for `client_credentials` flows):**
+### Step 1 — Fetch a Bearer token
 
 The Bearer token is a **JWT access token** — not the client secret. Fetch one
-with the same `client_credentials` grant used in step 7. Source your `.env`
-first so you don't have to copy-paste values:
+with the `client_credentials` grant. Source your `.env` first so the values
+are available automatically:
 
 ```bash
-# Load your Keycloak values from .env (run from the repo root)
+# Run from the repo root (WSL or Linux/macOS terminal)
 source <(sed 's/\r//' .env)
 
 TOKEN=$(curl -s -X POST "$KEYCLOAK_ISSUER_URL/protocol/openid-connect/token" \
@@ -280,14 +256,59 @@ TOKEN=$(curl -s -X POST "$KEYCLOAK_ISSUER_URL/protocol/openid-connect/token" \
 echo "$TOKEN"   # copy this — it's a long eyJ... string
 ```
 
-Paste the printed token into your config:
+> **Tip:** Tokens expire after 5 minutes by default. For local dev, increase
+> the lifetime in Keycloak: **Realm settings → Tokens → Access token lifespan**
+> → set to `1 day`. Then re-fetch and update the config. The client secret
+> itself never expires.
+
+### Step 2 — Edit `claude_desktop_config.json`
+
+Location:
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+**Recommended — direct `url` connector (no mcp-remote, works on all platforms):**
 
 ```json
 {
   "mcpServers": {
     "openaerostruct": {
-      "command": "npx",
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer <paste-eyJ...-token-here>"
+      }
+    }
+  }
+}
+```
+
+Replace `<paste-eyJ...-token-here>` with the token printed in step 1.
+
+**No auth (server running without Keycloak):**
+
+```json
+{
+  "mcpServers": {
+    "openaerostruct": {
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+**Fallback — `mcp-remote` bridge (older Claude Desktop, or if `url` is unsupported):**
+
+On Windows, `npx` may fail if Node.js is installed in a path with spaces
+(e.g. `C:\Program Files\nodejs`). Use the full quoted path to `npx.cmd`:
+
+```json
+{
+  "mcpServers": {
+    "openaerostruct": {
+      "command": "cmd",
       "args": [
+        "/c",
+        "\"C:\\Program Files\\nodejs\\npx.cmd\"",
         "-y", "mcp-remote",
         "http://localhost:8000/mcp",
         "--header", "Authorization: Bearer <paste-eyJ...-token-here>"
@@ -297,15 +318,23 @@ Paste the printed token into your config:
 }
 ```
 
-> **Note:** Access tokens expire (default Keycloak lifetime is 5 minutes). For
-> a permanent desktop setup, increase the lifetime in Keycloak under
-> **Realm settings → Tokens → Access token lifespan** (e.g. set to 1 day for
-> local dev), then re-fetch the token and update the config. The client secret
-> itself does not expire.
+On macOS/Linux the shorter form works fine:
+
+```json
+{
+  "mcpServers": {
+    "openaerostruct": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp",
+               "--header", "Authorization: Bearer <paste-eyJ...-token-here>"]
+    }
+  }
+}
+```
 
 ### Step 3 — Restart Claude Desktop
 
-The MCP server should appear in the tool panel within a few seconds of restart.
+The server should appear in the tool panel within a few seconds of restart.
 
 ---
 

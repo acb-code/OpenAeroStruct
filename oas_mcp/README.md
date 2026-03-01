@@ -266,36 +266,46 @@ You should receive an SSE response containing `serverInfo: {name: "OpenAeroStruc
 
 #### Step 4 — Connect from Claude Desktop (HTTP mode)
 
-Add the server to `claude_desktop_config.json` using `mcp-remote` as a stdio↔HTTP bridge.
+Claude Desktop (≥ 0.10) supports remote HTTP servers directly via a `"url"` key — no bridge needed:
 
-**macOS / Linux** (Node.js in system PATH):
 ```json
 {
   "mcpServers": {
     "openaerostruct": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"]
+      "url": "http://localhost:8000/mcp"
     }
   }
 }
 ```
 
-**Windows with WSL** (Node.js installed via nvm — adjust the path to match `which npx` in your WSL terminal):
+If Keycloak auth is enabled, add a `"headers"` field with a Bearer token (see `oas_mcp/keycloak_auth_setup.md` step 8 for how to fetch one):
+
 ```json
 {
   "mcpServers": {
     "openaerostruct": {
-      "command": "wsl",
-      "args": [
-        "bash", "-c",
-        "export PATH=/home/alex/.nvm/versions/node/v24.12.0/bin:$PATH; exec npx -y mcp-remote http://localhost:8000/mcp"
-      ]
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer <eyJ...token>"
+      }
     }
   }
 }
 ```
 
-> **Note:** Claude Desktop also supports a `"url"` key (`"url": "http://localhost:8000/mcp"`) for recent versions (≥ 0.10), but the `mcp-remote` bridge above works on all versions and avoids PATH issues with nvm.
+**Fallback — `mcp-remote` bridge** (older Claude Desktop versions): on Windows, Node.js paths with spaces cause `'C:\Program' is not recognized` errors. Use `cmd /c` with a quoted path:
+
+```json
+{
+  "mcpServers": {
+    "openaerostruct": {
+      "command": "cmd",
+      "args": ["/c", "\"C:\\Program Files\\nodejs\\npx.cmd\"",
+               "-y", "mcp-remote", "http://localhost:8000/mcp"]
+    }
+  }
+}
+```
 
 #### Customise the Docker deployment
 
