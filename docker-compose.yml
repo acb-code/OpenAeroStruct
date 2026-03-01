@@ -1,0 +1,18 @@
+services:
+  oas-mcp:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - oas-data:/data
+    environment:
+      OAS_DATA_DIR: /data/artifacts
+      OAS_TRANSPORT: http
+      # Uncomment and set for Keycloak auth:
+      # KEYCLOAK_ISSUER_URL: https://your-keycloak.railway.app/realms/oas
+      # KEYCLOAK_CLIENT_ID: oas-mcp
+      # KEYCLOAK_CLIENT_SECRET: ""
+      # RESOURCE_SERVER_URL: http://localhost:8000
+
+volumes:
+  oas-data:

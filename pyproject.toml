@@ -24,7 +24,8 @@ test  = ["testflo"]
 ffd   = ["pygeo>=1.6.0"]
 mphys = ["mphys>=2.0.0", "pygeo>=1.15.0"]
 mcp   = ["mcp[cli]>=1.0"]
-all   = ["mphys>=2.0.0", "pygeo>=1.15.0", "sphinx_mdolab_theme", "testflo", "mcp[cli]>=1.0"]
+http  = ["mcp[cli]>=1.0", "uvicorn>=0.27", "PyJWT[crypto]>=2.8", "httpx>=0.27"]
+all   = ["mphys>=2.0.0", "pygeo>=1.15.0", "sphinx_mdolab_theme", "testflo", "mcp[cli]>=1.0", "uvicorn>=0.27", "PyJWT[crypto]>=2.8", "httpx>=0.27"]
 
 [project.urls]
 Homepage = "https://github.com/mdolab/OpenAeroStruct"

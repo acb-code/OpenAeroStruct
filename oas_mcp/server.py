@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
+import os
 import warnings
 from typing import Annotated, Any
 
@@ -28,6 +30,7 @@ from .core.results import (
     extract_aerostruct_results,
     extract_stability_results,
 )
+from .core.artifacts import ArtifactStore
 from .core.session import SessionManager
 from .core.validators import (
     validate_fem_model_type,
@@ -70,11 +73,20 @@ PERFORMANCE:
     conditions change, so parameter sweeps are very fast.
   • Calling create_surface again with the same name invalidates the cache.
 
+ARTIFACT STORAGE (every analysis is automatically saved):
+  • Each analysis tool returns a run_id — use it to retrieve results later.
+  • list_artifacts(session_id?, analysis_type?) — browse saved runs
+  • get_artifact(run_id) — full metadata + results for a past run
+  • get_artifact_summary(run_id) — metadata only (lightweight)
+  • delete_artifact(run_id) — remove a saved artifact
+  • oas://artifacts/{run_id} — resource access to any artifact by run_id
+
 Use the prompts (analyze_wing, aerostructural_design, optimize_wing) for guided
 workflows, and the resources (oas://reference, oas://workflows) for quick lookup.""",
 )
 
 _sessions = SessionManager()
+_artifacts = ArtifactStore()
 
 
 def _suppress_output(func, *args, **kwargs):
@@ -289,7 +301,18 @@ async def run_aero_analysis(
         return extract_aero_results(prob, surface_dicts, "aero")
 
     results = await asyncio.to_thread(_suppress_output, _run)
-    return results
+    run_id = _artifacts.save(
+        session_id=session_id,
+        analysis_type="aero",
+        tool_name="run_aero_analysis",
+        surfaces=surfaces,
+        parameters={
+            "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
+            "reynolds_number": reynolds_number, "density": density,
+        },
+        results=results,
+    )
+    return {**results, "run_id": run_id}
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +391,19 @@ async def run_aerostruct_analysis(
         return extract_aerostruct_results(prob, surface_dicts, "AS_point_0")
 
     results = await asyncio.to_thread(_suppress_output, _run)
-    return results
+    run_id = _artifacts.save(
+        session_id=session_id,
+        analysis_type="aerostruct",
+        tool_name="run_aerostruct_analysis",
+        surfaces=surfaces,
+        parameters={
+            "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
+            "reynolds_number": reynolds_number, "density": density,
+            "W0": W0, "R": R, "speed_of_sound": speed_of_sound, "load_factor": load_factor,
+        },
+        results=results,
+    )
+    return {**results, "run_id": run_id}
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +469,7 @@ async def compute_drag_polar(
     valid_LoDs = [(i, v) for i, v in enumerate(LoDs) if v is not None]
     best_idx, best_LoD = max(valid_LoDs, key=lambda x: x[1]) if valid_LoDs else (0, None)
 
-    return {
+    polar_results = {
         "alpha_deg": [round(float(a), 4) for a in alphas],
         "CL": [round(v, 6) for v in CLs],
         "CD": [round(v, 6) for v in CDs],
@@ -447,6 +482,19 @@ async def compute_drag_polar(
             "L_over_D": round(best_LoD, 4) if best_LoD else None,
         },
     }
+    run_id = _artifacts.save(
+        session_id=session_id,
+        analysis_type="drag_polar",
+        tool_name="compute_drag_polar",
+        surfaces=surfaces,
+        parameters={
+            "alpha_start": alpha_start, "alpha_end": alpha_end, "num_alpha": num_alpha,
+            "velocity": velocity, "Mach_number": Mach_number,
+            "reynolds_number": reynolds_number, "density": density,
+        },
+        results=polar_results,
+    )
+    return {**polar_results, "run_id": run_id}
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +617,18 @@ async def compute_stability_derivatives(
         return extract_stability_results(prob)
 
     results = await asyncio.to_thread(_suppress_output, _run)
-    return results
+    run_id = _artifacts.save(
+        session_id=session_id,
+        analysis_type="stability",
+        tool_name="compute_stability_derivatives",
+        surfaces=surfaces,
+        parameters={
+            "alpha": alpha, "velocity": velocity, "Mach_number": Mach_number,
+            "reynolds_number": reynolds_number, "density": density,
+        },
+        results=results,
+    )
+    return {**results, "run_id": run_id}
 
 
 # ---------------------------------------------------------------------------
@@ -695,7 +754,19 @@ async def run_optimization(
         }
 
     result = await asyncio.to_thread(_suppress_output, _run)
-    return result
+    run_id = _artifacts.save(
+        session_id=session_id,
+        analysis_type="optimization",
+        tool_name="run_optimization",
+        surfaces=surfaces,
+        parameters={
+            "analysis_type": analysis_type, "objective": objective,
+            "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
+            "density": density,
+        },
+        results=result,
+    )
+    return {**result, "run_id": run_id}
 
 
 # ---------------------------------------------------------------------------
@@ -719,6 +790,71 @@ async def reset(
         session = _sessions.get(session_id)
         session.clear()
         return {"status": f"Session '{session_id}' reset", "cleared": session_id}
+
+
+# ---------------------------------------------------------------------------
+# Tools 8–11 — artifact management
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def list_artifacts(
+    session_id: Annotated[str | None, "Filter by session ID, or None to list all sessions"] = None,
+    analysis_type: Annotated[
+        str | None,
+        "Filter by type: 'aero', 'aerostruct', 'drag_polar', 'stability', 'optimization'",
+    ] = None,
+) -> dict:
+    """List saved analysis artifacts with optional filters.
+
+    Returns a count and a list of index entries (run_id, session_id,
+    analysis_type, timestamp, surfaces, tool_name).  Does not load the
+    full results payload — use get_artifact for that.
+    """
+    entries = await asyncio.to_thread(_artifacts.list, session_id, analysis_type)
+    return {"count": len(entries), "artifacts": entries}
+
+
+@mcp.tool()
+async def get_artifact(
+    run_id: Annotated[str, "Run ID returned by an analysis tool"],
+    session_id: Annotated[
+        str | None, "Session that owns this artifact — speeds up lookup when provided"
+    ] = None,
+) -> dict:
+    """Retrieve a saved artifact (metadata + full results) by run_id."""
+    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id)
+    if artifact is None:
+        raise ValueError(f"Artifact '{run_id}' not found")
+    return artifact
+
+
+@mcp.tool()
+async def get_artifact_summary(
+    run_id: Annotated[str, "Run ID returned by an analysis tool"],
+    session_id: Annotated[str | None, "Session that owns this artifact"] = None,
+) -> dict:
+    """Retrieve artifact metadata only (no results payload) — much smaller response.
+
+    Returns: run_id, session_id, analysis_type, timestamp, surfaces,
+    tool_name, parameters.
+    """
+    summary = await asyncio.to_thread(_artifacts.get_summary, run_id, session_id)
+    if summary is None:
+        raise ValueError(f"Artifact '{run_id}' not found")
+    return summary
+
+
+@mcp.tool()
+async def delete_artifact(
+    run_id: Annotated[str, "Run ID to delete"],
+    session_id: Annotated[str | None, "Session that owns this artifact"] = None,
+) -> dict:
+    """Permanently delete a saved artifact from disk."""
+    deleted = await asyncio.to_thread(_artifacts.delete, run_id, session_id)
+    if not deleted:
+        raise ValueError(f"Artifact '{run_id}' not found")
+    return {"status": "deleted", "run_id": run_id}
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +927,15 @@ _REFERENCE = """\
 ## run_optimization — objective names
   aero:        CD, CL
   aerostruct:  fuelburn, structural_mass, CD
+
+## Artifact storage (automatic)
+  Every analysis tool saves a run_id.  Use it to retrieve results later.
+  list_artifacts(session_id?, analysis_type?)   list saved runs (index only)
+  get_artifact(run_id, session_id?)             full metadata + results
+  get_artifact_summary(run_id, session_id?)     metadata only (no payload)
+  delete_artifact(run_id, session_id?)          remove permanently
+  oas://artifacts/{run_id}                      resource access by run_id
+  OAS_DATA_DIR env var controls storage root    (default: ./oas_data/artifacts/)
 
 ## Common errors and fixes
   "num_y must be odd"           → change num_y to nearest odd number
@@ -948,6 +1093,15 @@ def workflow_guide() -> str:
     return _WORKFLOWS
 
 
+@mcp.resource("oas://artifacts/{run_id}", description="Retrieve a saved analysis artifact by run_id")
+def artifact_by_run_id(run_id: str) -> str:
+    """Return the full artifact JSON for the given run_id."""
+    artifact = _artifacts.get(run_id)
+    if artifact is None:
+        return json.dumps({"error": f"Artifact '{run_id}' not found"})
+    return json.dumps(artifact, indent=2)
+
+
 # ---------------------------------------------------------------------------
 # Prompts — workflow templates that seed the agent with goal + context
 # ---------------------------------------------------------------------------
@@ -1093,8 +1247,54 @@ baseline CL/CD before optimisation.
 
 
 def main():
-    """Console-script entry point for oas-mcp."""
-    mcp.run()
+    """Console-script entry point for oas-mcp.
+
+    Supports two transports:
+
+    * ``stdio`` (default) — standard MCP stdio transport for Claude Desktop /
+      local clients.
+    * ``http`` — streamable HTTP transport for remote clients.  Requires the
+      ``[http]`` extra (``pip install 'openaerostruct[http]'``).  Reads host
+      and port from ``--host`` / ``--port`` CLI args or ``OAS_HOST`` /
+      ``OAS_PORT`` env vars.
+
+    Set the transport via ``--transport`` or the ``OAS_TRANSPORT`` env var.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="OpenAeroStruct MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default=os.environ.get("OAS_TRANSPORT", "stdio"),
+        help="Transport protocol (default: stdio)",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("OAS_HOST", "127.0.0.1"),
+        help="Bind host for HTTP transport (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("OAS_PORT", "8000")),
+        help="Bind port for HTTP transport (default: 8000)",
+    )
+    args = parser.parse_args()
+
+    if args.transport == "http":
+        try:
+            import uvicorn
+        except ImportError as exc:
+            raise ImportError(
+                "uvicorn is required for HTTP transport. "
+                "Install it with: pip install 'openaerostruct[http]'"
+            ) from exc
+
+        app = mcp.streamable_http_app()
+        uvicorn.run(app, host=args.host, port=args.port)
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":

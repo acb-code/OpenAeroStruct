@@ -5,37 +5,405 @@ An [MCP](https://modelcontextprotocol.io) server that wraps [OpenAeroStruct](htt
 ## Contents
 
 - [Overview](#overview)
-- [How agents learn to use the server](#how-agents-learn-to-use-the-server)
 - [Installation](#installation)
 - [Running the server](#running-the-server)
+  - [stdio (Claude Desktop)](#stdio-transport-default--for-claude-desktop-and-most-mcp-clients)
+  - [HTTP transport](#http-transport)
+  - [Docker](#docker)
 - [Running the tests](#running-the-tests)
+- [Artifact storage](#artifact-storage)
+- [How agents learn to use the server](#how-agents-learn-to-use-the-server)
 - [Architecture](#architecture)
 - [Tools reference](#tools-reference)
-- [Example: wing analysis and drag polar](#example-wing-analysis-and-drag-polar)
+- [Example walkthrough](#example-walkthrough)
+- [Tips](#tips)
 
 ---
 
 ## Overview
 
-Setting up an OpenAeroStruct analysis normally requires 50–100 lines of OpenMDAO boilerplate: `IndepVarComp`, `Geometry` groups, `AeroPoint` or `AerostructPoint`, and a dozen `connect()` calls. This server hides all of that behind seven tool calls.
+Setting up an OpenAeroStruct analysis normally requires 50–100 lines of OpenMDAO boilerplate: `IndepVarComp`, `Geometry` groups, `AeroPoint` or `AerostructPoint`, and a dozen `connect()` calls. This server hides all of that behind tool calls.
 
-**What you can do:**
+**Analysis tools:**
 
-| Goal | Tool |
-|------|------|
-| Define a wing geometry | `create_surface` |
-| Single-point VLM analysis (CL, CD, CM) | `run_aero_analysis` |
-| Coupled aero + structural analysis | `run_aerostruct_analysis` |
-| Generate a CL-CD-CM drag polar | `compute_drag_polar` |
-| Compute CL_α, CM_α, static margin | `compute_stability_derivatives` |
-| Optimise twist/thickness/alpha | `run_optimization` |
-| Clear state between experiments | `reset` |
+| Tool | Purpose |
+|------|---------|
+| `create_surface` | Define a lifting surface geometry |
+| `run_aero_analysis` | Single-point VLM analysis (CL, CD, CM) |
+| `run_aerostruct_analysis` | Coupled aero + structural analysis (fuel burn, failure) |
+| `compute_drag_polar` | Sweep α and return CL-CD-CM arrays |
+| `compute_stability_derivatives` | CL_α, CM_α, static margin |
+| `run_optimization` | Optimise twist / thickness / α |
+| `reset` | Clear surfaces and cached problems |
+
+**Artifact management tools** (every analysis auto-saves; use these to retrieve past results):
+
+| Tool | Purpose |
+|------|---------|
+| `list_artifacts` | Browse saved runs with optional filters |
+| `get_artifact` | Retrieve full metadata + results by `run_id` |
+| `get_artifact_summary` | Metadata only — no results payload |
+| `delete_artifact` | Remove a saved artifact permanently |
 
 **Key properties:**
 
-- **Stateful sessions** — surfaces are stored by name; call `create_surface` once, then run analyses repeatedly.
-- **Problem caching** — `om.Problem.setup()` is expensive. The server runs it once per unique geometry and reuses the cached problem for parameter sweeps, making repeated `run_aero_analysis` calls with different alpha/Mach values fast.
+- **Persistent artifacts** — every analysis run is saved to disk and returns a `run_id`. Results survive server restarts and can be retrieved at any time.
+- **Stateful sessions** — surfaces are stored by name; call `create_surface` once, then run analyses repeatedly without redefining geometry.
+- **Problem caching** — `om.Problem.setup()` is expensive. The server runs it once per unique geometry and reuses the cached problem for parameter sweeps, making repeated calls with different α/Mach values fast.
 - **Async** — all OpenMDAO computation runs in `asyncio.to_thread()` so the event loop stays responsive.
+- **Multiple transports** — stdio (default, for Claude Desktop) or streamable HTTP (for remote/cloud deployment).
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Python ≥ 3.11
+- A C/Fortran toolchain for numpy/scipy (`gcc`, `gfortran`, `libopenblas-dev` on Linux; Xcode CLI tools on macOS)
+
+### Step 1 — Clone and enter the repository
+
+```bash
+git clone https://github.com/mdolab/OpenAeroStruct.git
+cd OpenAeroStruct
+```
+
+### Step 2 — Create a virtual environment
+
+```bash
+python -m venv .venv
+source .venv/bin/activate        # Linux / macOS
+# .venv\Scripts\activate         # Windows PowerShell
+```
+
+Or with `uv`:
+
+```bash
+uv venv
+source .venv/bin/activate
+```
+
+### Step 3 — Install the package
+
+**For Claude Desktop / stdio use (minimum):**
+
+```bash
+pip install -e ".[mcp]"
+# or: uv pip install -e ".[mcp]"
+```
+
+**For HTTP transport + Keycloak auth:**
+
+```bash
+pip install -e ".[http]"
+# or: uv pip install -e ".[http]"
+```
+
+The `[http]` extra adds `uvicorn`, `PyJWT[crypto]`, and `httpx` on top of `mcp[cli]`.
+
+**Everything (including test and docs dependencies):**
+
+```bash
+pip install -e ".[all]"
+```
+
+### Step 4 — Verify the installation
+
+```bash
+oas-mcp --help
+```
+
+```
+usage: oas-mcp [-h] [--transport {stdio,http}] [--host HOST] [--port PORT]
+```
+
+---
+
+## Running the server
+
+### stdio transport (default — for Claude Desktop and most MCP clients)
+
+```bash
+oas-mcp
+# or equivalently:
+python -m oas_mcp.server
+```
+
+The server speaks the MCP stdio protocol on stdin/stdout. Claude Desktop and most MCP clients use this mode.
+
+#### Add to Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or the equivalent on your platform:
+
+```json
+{
+  "mcpServers": {
+    "openaerostruct": {
+      "command": "/path/to/.venv/bin/python",
+      "args": ["-m", "oas_mcp.server"]
+    }
+  }
+}
+```
+
+Replace `/path/to/.venv` with the absolute path to the virtual environment where you installed the package. On Linux with the repository's `.venv`:
+
+```json
+{
+  "mcpServers": {
+    "openaerostruct": {
+      "command": "/home/alex/coding/OpenAeroStruct/.venv/bin/python",
+      "args": ["-m", "oas_mcp.server"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after saving the config file. The server should appear in the MCP panel.
+
+#### Smoke-test the server interactively
+
+```bash
+mcp dev oas_mcp/server.py
+```
+
+This opens the MCP Inspector in your browser. You can call tools directly from the UI to verify everything is working before connecting to Claude Desktop.
+
+---
+
+### HTTP transport
+
+HTTP transport exposes the server as a streamable HTTP endpoint — useful for remote deployment, Docker, or multi-user environments.
+
+#### Step 1 — Install HTTP dependencies
+
+```bash
+pip install -e ".[http]"
+```
+
+#### Step 2 — Start the server
+
+```bash
+oas-mcp --transport http --host 127.0.0.1 --port 8000
+```
+
+Or via environment variables (useful in Docker / CI):
+
+```bash
+OAS_TRANSPORT=http OAS_PORT=8000 oas-mcp
+```
+
+The server will print:
+```
+INFO:     Started server process [...]
+INFO:     Uvicorn running on http://127.0.0.1:8000
+```
+
+#### Step 3 — Connect an MCP client
+
+Point your MCP client at `http://127.0.0.1:8000/mcp`.
+
+#### Step 4 — (Optional) Enable Keycloak authentication
+
+Copy `env.example` to `.env` and fill in your Keycloak details:
+
+```bash
+cp env.example .env
+```
+
+```dotenv
+OAS_TRANSPORT=http
+OAS_DATA_DIR=/data/artifacts
+KEYCLOAK_ISSUER_URL=https://your-keycloak.railway.app/realms/oas
+KEYCLOAK_CLIENT_ID=oas-mcp
+KEYCLOAK_CLIENT_SECRET=<your-secret>
+RESOURCE_SERVER_URL=http://localhost:8000
+```
+
+Then start the server — it will automatically pick up the env vars and wire in the Keycloak token verifier:
+
+```bash
+source .env && oas-mcp --transport http
+```
+
+When `KEYCLOAK_ISSUER_URL` is set the server validates RS256 JWTs on every request. Requests without a valid Bearer token receive `401 Unauthorized`.
+
+---
+
+### Docker
+
+Docker is the easiest way to deploy the HTTP server with persistent artifact storage.
+
+#### Step 1 — Build the image
+
+```bash
+docker build -t oas-mcp .
+```
+
+#### Step 2 — Start the server
+
+```bash
+docker compose up
+```
+
+This starts the `oas-mcp` service on port 8000 with a named volume (`oas-data`) mounted at `/data`. Artifacts are stored under `/data/artifacts` inside the container and persist across restarts.
+
+#### Step 3 — Verify the server is running
+
+```bash
+curl http://localhost:8000/mcp
+```
+
+You should receive an MCP protocol response.
+
+#### Step 4 — Connect from Claude Desktop (HTTP mode)
+
+Add the server to `claude_desktop_config.json` using its HTTP URL:
+
+```json
+{
+  "mcpServers": {
+    "openaerostruct": {
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+#### Customise the Docker deployment
+
+Override environment variables in `docker-compose.yml` or with `-e` flags:
+
+```bash
+docker run -p 8000:8000 -v oas-data:/data \
+  -e OAS_TRANSPORT=http \
+  -e OAS_DATA_DIR=/data/artifacts \
+  -e KEYCLOAK_ISSUER_URL=https://your-keycloak.railway.app/realms/oas \
+  oas-mcp
+```
+
+---
+
+## Running the tests
+
+Tests use pytest with `asyncio_mode = "auto"` (configured in `pyproject.toml`).
+
+### Step 1 — Install test dependencies
+
+```bash
+pip install pytest pytest-asyncio
+# or (if you used the [all] extra, these are already installed)
+```
+
+### Step 2 — Run all tests
+
+```bash
+pytest
+# ~105 tests in ~5 s
+```
+
+### Fast feedback — unit tests only (no OAS computation)
+
+```bash
+pytest -m "not slow"
+# 68 tests in ~0.2 s
+```
+
+This covers:
+- `test_artifacts.py` — 20 tests for `ArtifactStore` (no OAS required)
+- `test_validators.py` — input validation
+- `test_session.py` — session caching
+- `test_mesh.py` — mesh building and transforms
+
+### Integration tests only
+
+```bash
+pytest -m slow
+# 37 tests in ~4 s (runs real OAS computations)
+```
+
+### Run a single test file
+
+```bash
+pytest oas_mcp/tests/test_artifacts.py -v
+pytest oas_mcp/tests/test_tools.py -v
+```
+
+---
+
+## Artifact storage
+
+Every analysis tool automatically saves its results to disk and returns a `run_id` in its response. You can retrieve, list, or delete artifacts at any time — results persist across server restarts.
+
+### Storage layout
+
+```
+$OAS_DATA_DIR/                        # default: ./oas_data/artifacts/
+  {session_id}/
+    index.json                        # fast index: [{run_id, analysis_type, timestamp, …}]
+    20260301T143022_a7f3.json         # full artifact: {metadata: {…}, results: {…}}
+    20260301T143055_b2c1.json
+```
+
+Set `OAS_DATA_DIR` to control the storage root (default: `./oas_data/artifacts/`; in Docker: `/data/artifacts`).
+
+### Run ID format
+
+Run IDs are formatted as `YYYYMMDDTHHMMSS_{4hex}` — human-readable, chronologically sortable, and collision-resistant (e.g. `20260301T143022_a7f3`).
+
+### Step-by-step: save and retrieve results
+
+**Step 1 — Run an analysis (artifact is saved automatically):**
+
+```python
+result = await run_aero_analysis(surfaces=["wing"], alpha=5.0)
+# result now contains a "run_id" key
+run_id = result["run_id"]   # e.g. "20260301T143022_a7f3"
+```
+
+**Step 2 — List saved artifacts:**
+
+```python
+# All artifacts across all sessions
+list_artifacts()
+
+# Filter by session
+list_artifacts(session_id="default")
+
+# Filter by analysis type
+list_artifacts(session_id="default", analysis_type="aero")
+```
+
+Returns `{count, artifacts: [{run_id, session_id, analysis_type, timestamp, surfaces, tool_name}]}`.
+
+**Step 3 — Retrieve a past result:**
+
+```python
+# Full artifact (metadata + results)
+get_artifact(run_id="20260301T143022_a7f3")
+
+# Metadata only (lightweight — no results payload)
+get_artifact_summary(run_id="20260301T143022_a7f3")
+```
+
+**Step 4 — Access via resource URI:**
+
+Any artifact can also be read directly as a resource:
+
+```
+oas://artifacts/20260301T143022_a7f3
+```
+
+**Step 5 — Delete an artifact:**
+
+```python
+delete_artifact(run_id="20260301T143022_a7f3")
+```
+
+### Self-healing index
+
+If `index.json` is missing or corrupt (e.g. after a crash or manual file deletion), the index is automatically rebuilt by scanning all artifact files in the session directory. No data is lost.
 
 ---
 
@@ -50,6 +418,7 @@ The `instructions` field on the `FastMCP` instance is sent to the LLM when the s
 - The mandatory workflow order (`create_surface` → analysis → optimisation)
 - Hard constraints that cause errors if violated (odd `num_y`, structural properties required for aerostruct)
 - Sensible default parameter values for cruise flight conditions
+- Artifact storage: how to retrieve past results using `run_id`
 - A note about performance (problem caching)
 
 This is the first thing an agent sees — it sets the framing without requiring any user action.
@@ -66,157 +435,15 @@ MCP prompts are named templates that encode "how to accomplish goal X" rather th
 
 In **Claude Desktop**, prompts appear in the `+` attachment menu and can be invoked by the user as conversation starters. In **agentic pipelines**, the orchestrator calls `prompts/get` to retrieve the message and prepends it to the agent's context.
 
-The prompts adapt their content to their arguments — for example, `optimize_wing` with `analysis_type="aerostruct"` automatically switches to fuel-burn objective options, adds `thickness` to the DV list, and adds `failure` and `L_equals_W` constraints.
-
 ### Layer 3 — Resources (on-demand reference material)
 
-Resources are URI-addressable documents the LLM can read when it needs detail. They keep individual tool docstrings short while making full documentation available.
+Resources are URI-addressable documents the LLM can read when it needs detail.
 
 | URI | Content |
 |-----|---------|
-| `oas://reference` | Parameter tables for all tools, valid value lists, return-value schemas, common errors and fixes |
+| `oas://reference` | Parameter tables for all tools, valid value lists, return-value schemas, artifact storage guide, common errors and fixes |
 | `oas://workflows` | Five complete step-by-step workflows (aero analysis, aerostructural sizing, aero optimisation, aerostructural optimisation, multi-surface wing+tail) |
-
-An agent can read these proactively at the start of a session (`resources/read`) or reactively when it encounters an unfamiliar parameter or error.
-
-### What this means in practice
-
-For a typical Claude Desktop session:
-
-1. The user connects to the server — Claude receives `instructions` automatically.
-2. The user picks a prompt (e.g. `analyze_wing`) from the attachment menu.
-3. Claude receives a fully detailed plan and starts calling tools to execute it.
-4. If Claude encounters an error or unfamiliar parameter, it reads `oas://reference`.
-
-For a programmatic agent:
-
-```python
-# 1. List available prompts to understand what workflows exist
-prompts = await session.list_prompts()
-
-# 2. Get a prompt to seed the agent's task
-result = await session.get_prompt("analyze_wing", {"wing_type": "CRM", "target_CL": "0.5"})
-agent_context = result.messages[0].content.text
-
-# 3. Read reference material upfront to reduce tool-call errors
-ref = await session.read_resource("oas://reference")
-
-# 4. Run the agent with the seeded context
-await agent.run(system=server_instructions, user=agent_context + "\n\n" + ref.content)
-```
-
-### Do you need a client-side skill?
-
-A client-side skill (e.g. a Claude Code `/oas-analyze` slash command) is useful for **triggering** the right prompt — it lets a user type a short command instead of selecting from a menu. But the *knowledge* about what to do lives in the server-side prompt, not in the skill. The skill just calls `prompts/get` with the appropriate arguments.
-
-If you want to add a Claude Code skill for this server, it would look like:
-
-```markdown
-Invoke the OpenAeroStruct MCP server's `analyze_wing` prompt with the wing
-parameters the user has described, then execute each step the prompt specifies
-using the OAS tools.
-```
-
-That separation — skill triggers intent, prompt encodes workflow, tools do work — keeps the knowledge in one place (the server) and makes it available to any MCP client, not just Claude Code.
-
----
-
-## Installation
-
-The server lives inside the `oas_mcp/` package in the OpenAeroStruct repository. It requires the `mcp` package in addition to normal OpenAeroStruct dependencies.
-
-```bash
-# From the repository root:
-uv pip install -e ".[mcp]"
-```
-
-Or with pip:
-
-```bash
-pip install -e ".[mcp]"
-```
-
-This installs OpenAeroStruct in editable mode together with `mcp[cli]`.
-
----
-
-## Running the server
-
-### stdio transport (default — for Claude Desktop and most MCP clients)
-
-```bash
-python -m oas_mcp.server
-```
-
-Or, if installed via the package entry point:
-
-```bash
-oas-mcp
-```
-
-### Add to Claude Desktop
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or the equivalent on your platform:
-
-```json
-{
-  "mcpServers": {
-    "openaerostruct": {
-      "command": "/path/to/venv/bin/python",
-      "args": ["-m", "oas_mcp.server"]
-    }
-  }
-}
-```
-
-Replace `/path/to/venv` with the path to the virtual environment where OpenAeroStruct is installed. On Linux with the repository's `.venv`:
-
-```json
-{
-  "mcpServers": {
-    "openaerostruct": {
-      "command": "/home/alex/coding/OpenAeroStruct/.venv/bin/python",
-      "args": ["-m", "oas_mcp.server"]
-    }
-  }
-}
-```
-
----
-
-## Running the tests
-
-Tests use pytest with `asyncio_mode = "auto"` (configured in `pyproject.toml`).
-
-### Install test dependencies
-
-```bash
-uv pip install pytest pytest-asyncio
-# or: pip install pytest pytest-asyncio
-```
-
-### Run everything
-
-```bash
-pytest
-# 85 tests in ~4 s
-```
-
-### Fast feedback — unit tests only (no OAS computation)
-
-```bash
-pytest -m "not slow"
-# 48 tests in ~0.1 s
-```
-
-### Integration tests only
-
-```bash
-pytest -m slow
-# 37 tests in ~4 s
-```
-
-The `slow` marker is applied to all tests in `test_tools.py`. Unit tests in `test_validators.py`, `test_session.py`, and `test_mesh.py` have no marker and run instantly.
+| `oas://artifacts/{run_id}` | Full JSON artifact for any saved run |
 
 ---
 
@@ -226,6 +453,8 @@ The `slow` marker is applied to all tests in `test_tools.py`. Unit tests in `tes
 oas_mcp/
 ├── server.py          # FastMCP entry point — all @mcp.tool() registrations
 ├── core/
+│   ├── artifacts.py   # ArtifactStore — filesystem-backed, thread-safe result persistence
+│   ├── auth.py        # KeycloakTokenVerifier — RS256 JWT validation for HTTP transport
 │   ├── defaults.py    # Default flight conditions and surface properties
 │   ├── validators.py  # Input validation with descriptive error messages
 │   ├── mesh.py        # generate_mesh() wrapper + sweep/dihedral/taper transforms
@@ -234,11 +463,12 @@ oas_mcp/
 │   ├── results.py     # extract_aero_results() / extract_aerostruct_results()
 │   └── session.py     # Session / SessionManager — surface store + problem cache
 └── tests/
-    ├── conftest.py          # Fixtures: clean_session (autouse), aero_wing, struct_wing
+    ├── conftest.py          # Fixtures: isolate_artifacts (autouse), clean_session (autouse), aero_wing, struct_wing
+    ├── test_artifacts.py    # Unit tests for ArtifactStore (20 tests, no OAS required)
     ├── test_validators.py   # Unit tests for validators
     ├── test_session.py      # Unit tests for session caching
     ├── test_mesh.py         # Unit tests for mesh building and transforms
-    └── test_tools.py        # Integration tests for all 7 tools
+    └── test_tools.py        # Integration tests for all tools
 ```
 
 ### How a tool call flows
@@ -256,6 +486,8 @@ MCP client
                                    ├─ prob.setup()   ← expensive, done once
                                    └─ session.store_problem()
                  └─ results.extract_aero_results() → plain dict
+            └─ _artifacts.save(results)          ← thread-safe file I/O
+            └─ return {**results, "run_id": ...}
 ```
 
 ### Session caching
@@ -347,8 +579,11 @@ Single-point vortex-lattice (VLM) aerodynamic analysis.
 | `reynolds_number` | float | `1e6` | Reynolds number per metre |
 | `density` | float | `0.38` | Air density in kg/m³ |
 | `cg` | float[3] | `[0,0,0]` | Centre of gravity in metres |
+| `session_id` | str | `"default"` | Session identifier |
 
-**Returns:** `{CL, CD, CM, L_over_D, surfaces: {name: {CL, CD, CDi, CDv, CDw}}}`
+**Returns:** `{CL, CD, CM, L_over_D, surfaces: {name: {CL, CD, CDi, CDv, CDw}}, run_id}`
+
+The `run_id` can be passed to `get_artifact` at any future time to retrieve this result.
 
 ---
 
@@ -367,7 +602,7 @@ Additional parameters beyond `run_aero_analysis`:
 | `load_factor` | float | `1.0` | Load factor |
 | `empty_cg` | float[3] | `[0,0,0]` | Empty CG location in metres |
 
-**Returns:** aero results + `{fuelburn, structural_mass, L_equals_W, surfaces: {name: {..., failure, max_vonmises_Pa, structural_mass_kg}}}`
+**Returns:** aero results + `{fuelburn, structural_mass, L_equals_W, surfaces: {name: {..., failure, max_vonmises_Pa, structural_mass_kg}}, run_id}`
 
 The `failure` metric uses a KS-aggregated stress constraint (negative = no failure, positive = failed).
 
@@ -385,7 +620,7 @@ Sweeps angle of attack and returns CL, CD, CM arrays.
 | `num_alpha` | int | `21` | Number of alpha points |
 | + flight conditions | | | Same as `run_aero_analysis` (no `alpha`) |
 
-**Returns:** `{alpha_deg[], CL[], CD[], CM[], L_over_D[], best_L_over_D: {alpha_deg, CL, CD, L_over_D}}`
+**Returns:** `{alpha_deg[], CL[], CD[], CM[], L_over_D[], best_L_over_D: {alpha_deg, CL, CD, L_over_D}, run_id}`
 
 ---
 
@@ -393,7 +628,7 @@ Sweeps angle of attack and returns CL, CD, CM arrays.
 
 Computes CL_α, CM_α, and static margin using finite differencing between two `AeroPoint` instances (Δα = 1×10⁻⁴ deg).
 
-**Returns:** `{CL, CD, CM, CL_alpha [1/deg], CM_alpha [1/deg], static_margin, stability}`
+**Returns:** `{CL, CD, CM, CL_alpha [1/deg], CM_alpha [1/deg], static_margin, stability, run_id}`
 
 `static_margin = −CM_α / CL_α`. Positive means statically stable.
 
@@ -433,7 +668,7 @@ Each DV dict: `{"name": "twist", "lower": -10.0, "upper": 15.0}` (scaler optiona
 
 Each constraint dict: `{"name": "CL", "equals": 0.5}` or `{"name": "failure", "upper": 0.0}`
 
-**Returns:** `{success, optimized_design_variables, final_results}`
+**Returns:** `{success, optimized_design_variables, final_results, run_id}`
 
 ---
 
@@ -448,24 +683,76 @@ reset(session_id="default")   # clears one session
 
 ---
 
-## Example: wing analysis and drag polar
+### `list_artifacts`
 
-This example defines a CRM wing, runs a cruise-point analysis, sweeps the drag polar, and then optimises twist for minimum drag at CL = 0.5.
+Browse saved analysis runs.
 
-### 1. Define the wing
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `session_id` | str | `None` | Filter by session, or `None` for all sessions |
+| `analysis_type` | str | `None` | Filter by type: `"aero"`, `"aerostruct"`, `"drag_polar"`, `"stability"`, `"optimization"` |
+
+**Returns:** `{count, artifacts: [{run_id, session_id, analysis_type, timestamp, surfaces, tool_name}]}`
+
+---
+
+### `get_artifact`
+
+Retrieve a saved artifact by `run_id`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `run_id` | str | — | Run ID returned by an analysis tool |
+| `session_id` | str | `None` | Optional hint — speeds up lookup when provided |
+
+**Returns:** `{metadata: {run_id, session_id, analysis_type, timestamp, surfaces, tool_name, parameters}, results: {…}}`
+
+Raises `ValueError` if the run ID is not found.
+
+---
+
+### `get_artifact_summary`
+
+Retrieve artifact metadata only — no results payload. Much smaller response than `get_artifact`.
+
+Same parameters as `get_artifact`.
+
+**Returns:** `{run_id, session_id, analysis_type, timestamp, surfaces, tool_name, parameters}`
+
+---
+
+### `delete_artifact`
+
+Permanently remove a saved artifact from disk and its index entry.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `run_id` | str | — | Run ID to delete |
+| `session_id` | str | `None` | Optional hint |
+
+**Returns:** `{status: "deleted", run_id}`
+
+Raises `ValueError` if the run ID is not found.
+
+---
+
+## Example walkthrough
+
+This example defines a CRM wing, runs a cruise-point analysis, sweeps the drag polar, checks stability, runs an aerostructural analysis, optimises twist for minimum drag, and then retrieves the saved results.
+
+### Step 1 — Define the wing
 
 ```python
 create_surface(
-    name        = "wing",
-    wing_type   = "CRM",       # Common Research Model planform
-    num_x       = 2,           # chordwise panels
-    num_y       = 7,           # spanwise panels (must be odd)
-    symmetry    = True,
-    with_viscous = True,
-    CD0         = 0.015,       # fuselage + nacelle parasite drag
-    # Aluminium 7075 tube spar
-    fem_model_type = "tube",
-    E              = 70e9,
+    name           = "wing",
+    wing_type      = "CRM",       # Common Research Model planform
+    num_x          = 2,           # chordwise panels
+    num_y          = 7,           # spanwise panels (must be odd)
+    symmetry       = True,
+    with_viscous   = True,
+    CD0            = 0.015,       # fuselage + nacelle parasite drag
+    fem_model_type = "tube",      # enables structural analysis
+    E              = 70e9,        # Al 7075
     G              = 30e9,
     yield_stress   = 500e6,
     safety_factor  = 2.5,
@@ -473,32 +760,29 @@ create_surface(
 )
 ```
 
-### 2. Single-point aero analysis
+### Step 2 — Single-point aero analysis
 
 ```python
-run_aero_analysis(
-    surfaces      = ["wing"],
-    velocity      = 248.136,   # m/s  (~Mach 0.84 at cruise altitude)
-    alpha         = 5.0,       # deg
-    Mach_number   = 0.84,
+result = run_aero_analysis(
+    surfaces        = ["wing"],
+    velocity        = 248.136,   # m/s (~Mach 0.84 at cruise altitude)
+    alpha           = 5.0,       # deg
+    Mach_number     = 0.84,
     reynolds_number = 1e6,
-    density       = 0.38,      # kg/m³  (≈ 11,000 m altitude)
+    density         = 0.38,      # kg/m³ (≈ 11 000 m altitude)
 )
+run_id_aero = result["run_id"]   # e.g. "20260301T143022_a7f3"
 ```
 
-```
+```json
 {
-  "CL": 0.5459,
-  "CD": 0.0367,
-  "CM": -0.6844,
-  "L_over_D": 14.88,
-  "surfaces": {
-    "wing": {"CL": 0.5459, "CD": 0.0367, "CDi": 0.0229, "CDv": 0.0123}
-  }
+  "CL": 0.5459, "CD": 0.0367, "CM": -0.6844, "L_over_D": 14.88,
+  "surfaces": {"wing": {"CL": 0.5459, "CDi": 0.0229, "CDv": 0.0123}},
+  "run_id": "20260301T143022_a7f3"
 }
 ```
 
-### 3. Drag polar
+### Step 3 — Drag polar
 
 ```python
 compute_drag_polar(
@@ -520,96 +804,98 @@ alpha   CL      CD      L/D
   8.0   0.7736  0.0460  16.82
  10.0   0.9239  0.0538  17.16   ← best L/D
  12.0   1.0727  0.0629  17.05
-
-best_L_over_D: {"alpha_deg": 10.0, "CL": 0.9239, "CD": 0.0538, "L_over_D": 17.16}
 ```
 
-### 4. Coupled aerostructural analysis
-
-```python
-run_aerostruct_analysis(
-    surfaces      = ["wing"],
-    velocity      = 248.136,
-    alpha         = 5.0,
-    Mach_number   = 0.84,
-    density       = 0.38,
-    W0            = 120000,    # kg  (aircraft empty weight excl. wing)
-    R             = 11.165e6,  # m   (range)
-    speed_of_sound = 295.4,
-    load_factor   = 1.0,
-)
-```
-
-```
-{
-  "CL": 0.5281,
-  "CD": 0.0364,
-  "L_over_D": 14.50,
-  "fuelburn": 165564,           # kg
-  "structural_mass": 124259,    # kg
-  "L_equals_W": 0.496,          # residual: 0 means L = W exactly
-  "surfaces": {
-    "wing": {
-      "failure": -0.7676,       # negative → no structural failure
-      "structural_mass_kg": 124259
-    }
-  }
-}
-```
-
-### 5. Aerodynamic optimisation
-
-Minimise CD subject to CL = 0.5 by varying wing twist and angle of attack:
-
-```python
-run_optimization(
-    surfaces          = ["wing"],
-    analysis_type     = "aero",
-    objective         = "CD",
-    design_variables  = [
-        {"name": "twist", "lower": -10.0, "upper": 15.0},
-        {"name": "alpha", "lower":  -5.0, "upper": 15.0},
-    ],
-    constraints       = [{"name": "CL", "equals": 0.5}],
-    Mach_number       = 0.84,
-    density           = 0.38,
-)
-```
-
-```
-{
-  "success": true,
-  "optimized_design_variables": {
-    "alpha":  [4.537],
-    "twist":  [-3.821, -1.786, 0.495, 6.517]
-  },
-  "final_results": {
-    "CL": 0.5000,
-    "CD": 0.0351,           # reduced from 0.0367 at baseline
-    "L_over_D": 14.25
-  }
-}
-```
-
-### 6. Stability derivatives
+### Step 4 — Stability derivatives
 
 ```python
 compute_stability_derivatives(
-    surfaces  = ["wing"],
-    alpha     = 5.0,
+    surfaces    = ["wing"],
+    alpha       = 5.0,
     Mach_number = 0.84,
-    density   = 0.38,
-    cg        = [5.0, 0.0, 0.0],   # CG at 5 m from leading edge
+    density     = 0.38,
+    cg          = [5.0, 0.0, 0.0],   # CG at 5 m from leading edge
 )
 ```
 
-```
+```json
 {
-  "CL_alpha": 0.0862,         # 1/deg  (lift-curve slope)
-  "CM_alpha": -0.0214,        # 1/deg  (negative → stabilising)
-  "static_margin": 0.248,     # positive → statically stable
+  "CL_alpha": 0.0862, "CM_alpha": -0.0214,
+  "static_margin": 0.248,
   "stability": "statically stable (positive static margin)"
 }
+```
+
+### Step 5 — Coupled aerostructural analysis
+
+```python
+run_aerostruct_analysis(
+    surfaces       = ["wing"],
+    velocity       = 248.136,
+    alpha          = 5.0,
+    Mach_number    = 0.84,
+    density        = 0.38,
+    W0             = 120000,    # kg (aircraft empty weight excl. wing)
+    R              = 11.165e6,  # m (range)
+    speed_of_sound = 295.4,
+    load_factor    = 1.0,
+)
+```
+
+```json
+{
+  "CL": 0.5281, "CD": 0.0364, "L_over_D": 14.50,
+  "fuelburn": 165564, "structural_mass": 124259,
+  "L_equals_W": 0.496,
+  "surfaces": {"wing": {"failure": -0.7676, "structural_mass_kg": 124259}},
+  "run_id": "20260301T143055_b2c1"
+}
+```
+
+`failure < 0` means no structural failure at this load condition.
+
+### Step 6 — Aerodynamic optimisation
+
+Minimise CD subject to CL = 0.5 by varying twist and angle of attack:
+
+```python
+run_optimization(
+    surfaces         = ["wing"],
+    analysis_type    = "aero",
+    objective        = "CD",
+    design_variables = [
+        {"name": "twist", "lower": -10.0, "upper": 15.0},
+        {"name": "alpha", "lower":  -5.0, "upper": 15.0},
+    ],
+    constraints      = [{"name": "CL", "equals": 0.5}],
+    Mach_number      = 0.84,
+    density          = 0.38,
+)
+```
+
+```json
+{
+  "success": true,
+  "optimized_design_variables": {
+    "alpha": [4.537],
+    "twist": [-3.821, -1.786, 0.495, 6.517]
+  },
+  "final_results": {"CL": 0.5000, "CD": 0.0351, "L_over_D": 14.25},
+  "run_id": "20260301T143120_c4d9"
+}
+```
+
+### Step 7 — Retrieve a past result
+
+```python
+# Look up the aero analysis saved in step 2
+get_artifact(run_id="20260301T143022_a7f3")
+
+# Or browse all saved runs for this session
+list_artifacts(session_id="default")
+
+# Or check just the metadata (no results payload)
+get_artifact_summary(run_id="20260301T143022_a7f3")
 ```
 
 ---
@@ -620,6 +906,8 @@ compute_stability_derivatives(
 
 **Multi-surface configurations.** Pass multiple surface names to analysis tools to model wing + tail configurations. Each surface must be created separately with `create_surface`.
 
-**Sessions.** All tools accept an optional `session_id` parameter (default `"default"`). Use different session IDs to maintain multiple independent configurations in the same server process.
+**Sessions.** All tools accept an optional `session_id` parameter (default `"default"`). Use different session IDs to maintain multiple independent configurations in the same server process. Artifacts are stored per session and can be filtered by `session_id` when listed.
 
-**Structural sizing.** The default `thickness_cp` is `0.1 * root_chord` at every control point. For realistic structural analysis, provide explicit values or follow the optimisation example and let the solver size the structure with a `failure` constraint.
+**Structural sizing.** The default `thickness_cp` is `0.1 * root_chord` at every control point. For realistic structural analysis, provide explicit values or let the solver size the structure with a `failure` constraint via `run_optimization`.
+
+**Artifact `session_id` hint.** If you know which session produced a `run_id`, passing `session_id` to `get_artifact`, `get_artifact_summary`, and `delete_artifact` makes the lookup O(1) instead of scanning all session directories.

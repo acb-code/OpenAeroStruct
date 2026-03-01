@@ -3,11 +3,14 @@ Shared fixtures for OAS MCP tests.
 
 The global session manager lives in oas_mcp.server, so we reset it between
 tests via the reset() tool to keep tests isolated.
+
+The global artifact store is redirected to a per-test tmp_path so that
+tests never write to the real oas_data/ directory.
 """
 
 import pytest
 import pytest_asyncio
-from oas_mcp.server import create_surface, reset
+from oas_mcp.server import _artifacts, create_surface, reset
 
 # Tiny mesh used across integration tests — fast but produces real results.
 SMALL_RECT = dict(
@@ -31,6 +34,15 @@ SMALL_RECT_STRUCT = dict(
     mrho=3.0e3,
     thickness_cp=[0.05, 0.1, 0.05],
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_artifacts(tmp_path):
+    """Redirect artifact storage to a per-test temp directory."""
+    original = _artifacts._data_dir
+    _artifacts._data_dir = tmp_path / "artifacts"
+    yield
+    _artifacts._data_dir = original
 
 
 @pytest_asyncio.fixture(autouse=True)
