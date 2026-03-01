@@ -260,7 +260,27 @@ Location:
 }
 ```
 
-**With a static Bearer token (for `client_credentials` flows — the token will expire; use a long-lived service account token):**
+**With a static Bearer token (for `client_credentials` flows):**
+
+The Bearer token is a **JWT access token** — not the client secret. Fetch one
+with the same `client_credentials` grant used in step 7:
+
+```bash
+KC=https://<your-railway-url>/realms/mcp-realm   # your KEYCLOAK_ISSUER_URL
+CLIENT_ID=oas-mcp
+CLIENT_SECRET=<your-client-secret>               # from Clients → oas-mcp → Credentials
+
+TOKEN=$(curl -s -X POST "$KC/protocol/openid-connect/token" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=$CLIENT_ID" \
+  -d "client_secret=$CLIENT_SECRET" \
+  -d "scope=mcp:tools" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+echo "$TOKEN"   # copy this — it's a long eyJ... string
+```
+
+Paste the printed token into your config:
 
 ```json
 {
@@ -270,14 +290,18 @@ Location:
       "args": [
         "-y", "mcp-remote",
         "http://localhost:8000/mcp",
-        "--header", "Authorization: Bearer <your-token>"
+        "--header", "Authorization: Bearer <paste-eyJ...-token-here>"
       ]
     }
   }
 }
 ```
 
-> **Note:** Static tokens expire (default Keycloak lifetime is 5 minutes). For a permanent desktop setup, either increase the token lifetime in Keycloak (**Realm settings → Tokens → Access token lifespan**) or use a token-refresh wrapper script.
+> **Note:** Access tokens expire (default Keycloak lifetime is 5 minutes). For
+> a permanent desktop setup, increase the lifetime in Keycloak under
+> **Realm settings → Tokens → Access token lifespan** (e.g. set to 1 day for
+> local dev), then re-fetch the token and update the config. The client secret
+> itself does not expire.
 
 ### Step 3 — Restart Claude Desktop
 
