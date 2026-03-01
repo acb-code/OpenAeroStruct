@@ -263,17 +263,17 @@ Location:
 **With a static Bearer token (for `client_credentials` flows):**
 
 The Bearer token is a **JWT access token** — not the client secret. Fetch one
-with the same `client_credentials` grant used in step 7:
+with the same `client_credentials` grant used in step 7. Source your `.env`
+first so you don't have to copy-paste values:
 
 ```bash
-KC=https://<your-railway-url>/realms/mcp-realm   # your KEYCLOAK_ISSUER_URL
-CLIENT_ID=oas-mcp
-CLIENT_SECRET=<your-client-secret>               # from Clients → oas-mcp → Credentials
+# Load your Keycloak values from .env (run from the repo root)
+source <(sed 's/\r//' .env)
 
-TOKEN=$(curl -s -X POST "$KC/protocol/openid-connect/token" \
+TOKEN=$(curl -s -X POST "$KEYCLOAK_ISSUER_URL/protocol/openid-connect/token" \
   -d "grant_type=client_credentials" \
-  -d "client_id=$CLIENT_ID" \
-  -d "client_secret=$CLIENT_SECRET" \
+  -d "client_id=$KEYCLOAK_CLIENT_ID" \
+  -d "client_secret=$KEYCLOAK_CLIENT_SECRET" \
   -d "scope=mcp:tools" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
