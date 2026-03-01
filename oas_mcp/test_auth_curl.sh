@@ -147,14 +147,29 @@ if [[ -n "$KC" && -n "$CLIENT_SECRET" ]]; then
 
     TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "
 import sys, json
-data = json.load(sys.stdin)
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError as e:
+    print(f'ERROR: response was not JSON: {e}', file=sys.stderr)
+    sys.exit(1)
 if 'access_token' in data:
     print(data['access_token'])
 else:
-    print('ERROR: ' + data.get('error_description', str(data)), file=sys.stderr)
+    # Print every field so it's clear what Keycloak rejected
+    error        = data.get('error', 'unknown')
+    description  = data.get('error_description', '(no error_description)')
+    print(f'ERROR: {error} — {description}', file=sys.stderr)
+    print(f'Full response: {json.dumps(data, indent=2)}', file=sys.stderr)
     sys.exit(1)
 " 2>&1) || {
         red "  FAIL  Could not fetch token: $TOKEN"
+        red "  Keycloak URL: $KC/protocol/openid-connect/token"
+        red "  client_id:    $CLIENT_ID"
+        red "  Common causes:"
+        red "    • 'Service accounts roles' not enabled on the client (enables client_credentials grant)"
+        red "    • Wrong client_secret in .env"
+        red "    • Client does not exist in this realm"
+        red "    • Realm name is wrong in KEYCLOAK_ISSUER_URL"
         ((FAIL++)) || true
         TOKEN=""
     }
