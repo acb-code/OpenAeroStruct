@@ -5,15 +5,17 @@ services:
       - "8000:8000"
     volumes:
       - oas-data:/data
+    # Load secrets from .env (copy from .env.example and fill in values).
+    # Variables set in the environment: block below override whatever is in .env.
+    env_file:
+      - path: .env
+        required: false
     environment:
-      OAS_DATA_DIR: /data/artifacts
+      # Docker-specific overrides — always use HTTP, bind to all interfaces,
+      # and store artifacts in the named volume.
       OAS_TRANSPORT: http
       OAS_HOST: 0.0.0.0
-      # Uncomment and set for Keycloak auth:
-      # KEYCLOAK_ISSUER_URL: https://your-keycloak.railway.app/realms/oas
-      # KEYCLOAK_CLIENT_ID: oas-mcp
-      # KEYCLOAK_CLIENT_SECRET: ""
-      # RESOURCE_SERVER_URL: http://localhost:8000
+      OAS_DATA_DIR: /data/artifacts
 
 volumes:
   oas-data:

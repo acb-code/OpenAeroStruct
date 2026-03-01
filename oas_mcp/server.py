@@ -1262,8 +1262,18 @@ def main():
       ``OAS_PORT`` env vars.
 
     Set the transport via ``--transport`` or the ``OAS_TRANSPORT`` env var.
+
+    Environment variables are loaded from a ``.env`` file in the working
+    directory (or any parent) via ``python-dotenv``.  Variables already set
+    in the process environment take precedence over the file.
     """
     import argparse
+
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()  # no-op if .env is absent; env vars set externally win
+    except ImportError:
+        pass  # python-dotenv not installed — use env vars as-is
 
     parser = argparse.ArgumentParser(description="OpenAeroStruct MCP Server")
     parser.add_argument(

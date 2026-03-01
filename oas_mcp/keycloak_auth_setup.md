@@ -128,17 +128,18 @@ Now every token issued to `oas-mcp` will contain `scope: "mcp:tools openid"`.
 
 ## 6. Configure the OAS server
 
-Copy `.env` and fill in your values:
+Copy `.env.example` to `.env` and fill in your values. `.env` is gitignored so
+secrets never end up in version control.
 
 ```bash
-cp .env .env.local   # keep .env as the template
+cp .env.example .env
 ```
 
-Edit `.env.local`:
+Edit `.env`:
 
 ```dotenv
 OAS_TRANSPORT=http
-OAS_HOST=0.0.0.0
+OAS_HOST=127.0.0.1
 OAS_PORT=8000
 OAS_DATA_DIR=./oas_data/artifacts
 
@@ -148,41 +149,42 @@ KEYCLOAK_CLIENT_SECRET=<paste-secret-from-step-4>
 RESOURCE_SERVER_URL=http://localhost:8000
 ```
 
+The server uses `python-dotenv` to load `.env` automatically on startup — no
+`source` or `export` needed.
+
 ### Local (no Docker)
 
 ```bash
-source .env.local
 oas-mcp --transport http
 ```
 
-The startup line in your terminal should read:
+The server reads `.env` from the current working directory (or any parent).
+The startup line should read:
+
 ```
 OAS MCP — HTTP transport  |  auth: Keycloak (https://<your-railway-url>/realms/oas)
 ```
 
-If you see the `⚠ NO AUTHENTICATION ENABLED ⚠` box instead, `KEYCLOAK_ISSUER_URL` was not picked up — double-check the `source` step.
+If you see the `⚠ NO AUTHENTICATION ENABLED ⚠` box instead, `KEYCLOAK_ISSUER_URL`
+was not picked up — check that `.env` is in the directory you launched from and
+that the value is not empty.
 
 ### Docker
 
-Uncomment the Keycloak block in `docker-compose.yml`:
-
-```yaml
-environment:
-  OAS_DATA_DIR: /data/artifacts
-  OAS_TRANSPORT: http
-  OAS_HOST: 0.0.0.0
-  KEYCLOAK_ISSUER_URL: https://<your-railway-url>/realms/oas
-  KEYCLOAK_CLIENT_ID: oas-mcp
-  KEYCLOAK_CLIENT_SECRET: <your-secret>
-  RESOURCE_SERVER_URL: http://localhost:8000
-```
-
-Then:
+`docker-compose.yml` uses `env_file` to load `.env` automatically. No edits to
+the Compose file are needed — just place a populated `.env` in the same directory
+and start the stack:
 
 ```bash
+cp .env.example .env          # if you haven't already
+# edit .env with your Keycloak values
 docker compose build && docker compose up -d
-docker compose logs -f   # watch for the auth confirmation line
+docker compose logs -f        # watch for the auth confirmation line
 ```
+
+The `environment:` block in `docker-compose.yml` sets Docker-specific overrides
+(`OAS_TRANSPORT=http`, `OAS_HOST=0.0.0.0`, `OAS_DATA_DIR=/data/artifacts`) that
+take precedence over whatever is in `.env`, so you don't need to change those.
 
 ---
 
@@ -415,13 +417,26 @@ curl -s -X POST http://localhost:8000/mcp \
 
 ### Server prints the `⚠ NO AUTHENTICATION ENABLED ⚠` box despite setting env vars
 
-The module-level constants in `auth.py` are read at import time. If you set the env var *after* the Python process started (e.g. `export` in the same shell then ran `oas-mcp` without `source`), restart the process:
+The module-level constants in `auth.py` are read at import time, which happens
+after `python-dotenv` loads `.env` in `main()`. The most common causes:
 
-```bash
-source .env.local && oas-mcp --transport http
-```
+1. **`.env` is in the wrong directory** — `python-dotenv` searches the current
+   working directory and its parents. Run `oas-mcp` from the repo root where
+   `.env` lives, or use an absolute path:
+   ```bash
+   cd /path/to/OpenAeroStruct && oas-mcp --transport http
+   ```
 
-Or pass env vars inline:
+2. **The value is empty** — check `grep KEYCLOAK_ISSUER_URL .env` returns a
+   non-empty value.
+
+3. **Env var already set to empty in the shell** — `python-dotenv` does not
+   override variables already present in the process environment. Unset it first:
+   ```bash
+   unset KEYCLOAK_ISSUER_URL && oas-mcp --transport http
+   ```
+
+Or pass values inline to bypass `.env` entirely:
 
 ```bash
 KEYCLOAK_ISSUER_URL=https://... KEYCLOAK_CLIENT_ID=oas-mcp KEYCLOAK_CLIENT_SECRET=... oas-mcp --transport http
