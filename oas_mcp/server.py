@@ -7,6 +7,15 @@ to a thread pool via asyncio.to_thread() so the event loop stays responsive.
 
 from __future__ import annotations
 
+# Load .env before any module-level env var reads.
+# auth.py reads KEYCLOAK_ISSUER_URL at import time, and FastMCP() is
+# constructed at module level — both must happen after dotenv runs.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv()
+except ImportError:
+    pass
+
 import asyncio
 import contextlib
 import io
@@ -1264,16 +1273,11 @@ def main():
     Set the transport via ``--transport`` or the ``OAS_TRANSPORT`` env var.
 
     Environment variables are loaded from a ``.env`` file in the working
-    directory (or any parent) via ``python-dotenv``.  Variables already set
-    in the process environment take precedence over the file.
+    directory (or any parent) via ``python-dotenv`` at module import time,
+    before Keycloak settings and FastMCP are initialised.  Variables already
+    set in the process environment take precedence over the file.
     """
     import argparse
-
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()  # no-op if .env is absent; env vars set externally win
-    except ImportError:
-        pass  # python-dotenv not installed — use env vars as-is
 
     parser = argparse.ArgumentParser(description="OpenAeroStruct MCP Server")
     parser.add_argument(
