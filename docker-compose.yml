@@ -8,6 +8,7 @@ services:
     environment:
       OAS_DATA_DIR: /data/artifacts
       OAS_TRANSPORT: http
+      OAS_HOST: 0.0.0.0
       # Uncomment and set for Keycloak auth:
       # KEYCLOAK_ISSUER_URL: https://your-keycloak.railway.app/realms/oas
       # KEYCLOAK_CLIENT_ID: oas-mcp

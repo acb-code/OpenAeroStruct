@@ -16,6 +16,7 @@ An [MCP](https://modelcontextprotocol.io) server that wraps [OpenAeroStruct](htt
 - [Architecture](#architecture)
 - [Tools reference](#tools-reference)
 - [Example walkthrough](#example-walkthrough)
+- [Usage capabilities at a glance](#usage-capabilities-at-a-glance)
 - [Tips](#tips)
 
 ---
@@ -252,24 +253,49 @@ This starts the `oas-mcp` service on port 8000 with a named volume (`oas-data`) 
 #### Step 3 — Verify the server is running
 
 ```bash
-curl http://localhost:8000/mcp
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}' \
+  http://localhost:8000/mcp
 ```
 
-You should receive an MCP protocol response.
+You should receive an SSE response containing `serverInfo: {name: "OpenAeroStruct", ...}`.
+
+> **Note:** A plain `curl http://localhost:8000/mcp` returns `406 Not Acceptable` (correct — the server requires `Accept: text/event-stream`) and a POST without a session ID returns `400 Bad Request: Missing session ID`. Both indicate the server is running normally.
 
 #### Step 4 — Connect from Claude Desktop (HTTP mode)
 
-Add the server to `claude_desktop_config.json` using its HTTP URL:
+Add the server to `claude_desktop_config.json` using `mcp-remote` as a stdio↔HTTP bridge.
 
+**macOS / Linux** (Node.js in system PATH):
 ```json
 {
   "mcpServers": {
     "openaerostruct": {
-      "url": "http://localhost:8000/mcp"
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"]
     }
   }
 }
 ```
+
+**Windows with WSL** (Node.js installed via nvm — adjust the path to match `which npx` in your WSL terminal):
+```json
+{
+  "mcpServers": {
+    "openaerostruct": {
+      "command": "wsl",
+      "args": [
+        "bash", "-c",
+        "export PATH=/home/alex/.nvm/versions/node/v24.12.0/bin:$PATH; exec npx -y mcp-remote http://localhost:8000/mcp"
+      ]
+    }
+  }
+}
+```
+
+> **Note:** Claude Desktop also supports a `"url"` key (`"url": "http://localhost:8000/mcp"`) for recent versions (≥ 0.10), but the `mcp-remote` bridge above works on all versions and avoids PATH issues with nvm.
 
 #### Customise the Docker deployment
 
@@ -897,6 +923,16 @@ list_artifacts(session_id="default")
 # Or check just the metadata (no results payload)
 get_artifact_summary(run_id="20260301T143022_a7f3")
 ```
+
+---
+
+## Usage capabilities at a glance
+
+The server supports a full analysis loop: define geometry, run aerodynamic/aerostructural analyses, optimize design variables, and inspect convergence trends and resulting wing-state changes. The example report below illustrates the kinds of outputs agents can generate from tool-call results.
+
+![NTX-320 usage overview dashboard](images/usage_overview_top.png)
+
+![NTX-320 optimization convergence view](images/usage_optimization_history.png)
 
 ---
 
