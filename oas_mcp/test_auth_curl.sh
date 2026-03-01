@@ -176,12 +176,42 @@ else:
 
     if [[ -n "$TOKEN" && "$TOKEN" != ERROR* ]]; then
         echo "  Token: ${TOKEN:0:60}..."
+        # Decode and show the relevant JWT claims for quick diagnosis
+        python3 -c "
+import base64, json, sys
+payload = sys.argv[1].split('.')[1]
+payload += '=' * (4 - len(payload) % 4)
+c = json.loads(base64.b64decode(payload))
+for k in ['iss','aud','azp','scope','exp']:
+    if k in c: print(f'  {k}: {c[k]}')
+" "$TOKEN"
 
         BODY=$(curl -s --max-time 15 \
             -X POST "${MCP_HEADERS[@]}" \
             -H "Authorization: Bearer $TOKEN" \
             -d "$MCP_INIT_BODY" "$SERVER_URL")
-        assert_contains "valid token → serverInfo in response" "OpenAeroStruct" "$BODY"
+
+        if ! echo "$BODY" | grep -q "OpenAeroStruct"; then
+            red "  FAIL  valid token → serverInfo in response — response does not contain 'OpenAeroStruct'"
+            red "         Response: $(echo "$BODY" | head -c 200)"
+            red "  Diagnosis:"
+            python3 -c "
+import base64, json, sys
+payload = sys.argv[1].split('.')[1]
+payload += '=' * (4 - len(payload) % 4)
+c = json.loads(base64.b64decode(payload))
+aud = c.get('aud', '(missing)')
+client_id = sys.argv[2]
+if aud != client_id and (not isinstance(aud, list) or client_id not in aud):
+    print(f'  \033[31m  aud claim is {repr(aud)!s} but server expects {repr(client_id)!s}\033[0m')
+    print(f'  \033[31m  Fix: add an Audience mapper in Keycloak → Clients → oas-mcp → Client scopes\033[0m')
+    print(f'  \033[31m       → oas-mcp-dedicated → Add mapper → Audience → Included Client Audience = {client_id}\033[0m')
+" "$TOKEN" "$CLIENT_ID"
+            ((FAIL++)) || true
+        else
+            green "  PASS  valid token → serverInfo in response"
+            ((PASS++)) || true
+        fi
 
         # Also verify a clearly expired/tampered token gets 401
         TAMPERED="${TOKEN}tampered"
