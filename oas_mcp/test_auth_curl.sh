@@ -19,8 +19,10 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$REPO_ROOT/.env"
 
 if [[ -f "$ENV_FILE" ]]; then
+    # Strip Windows CR characters before sourcing — .env is gitignored so
+    # .gitattributes can't enforce LF, and editors on Windows often write CRLF.
     # shellcheck disable=SC1090
-    set -a; source "$ENV_FILE"; set +a
+    set -a; source <(sed 's/\r//' "$ENV_FILE"); set +a
     echo "Loaded $ENV_FILE"
 else
     echo "Warning: $ENV_FILE not found — using environment variables as-is"
