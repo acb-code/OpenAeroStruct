@@ -205,7 +205,43 @@ INFO:     Uvicorn running on http://127.0.0.1:8000
 
 Point your MCP client at `http://127.0.0.1:8000/mcp`.
 
-#### Step 4 — (Optional) Enable Keycloak authentication
+#### Step 4 — (Optional) Expose via ngrok for Claude.ai
+
+Claude.ai requires a **public HTTPS URL** to connect to your MCP server. ngrok
+creates a secure tunnel from a public URL to your local server in one command.
+
+```bash
+# Install ngrok (Linux / WSL — one-time):
+curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok-v3-stable-linux-amd64.tgz \
+  | sudo tar xvz -C /usr/local/bin
+ngrok authtoken <your-ngrok-token>   # free account at ngrok.com
+
+# Expose the running MCP server:
+ngrok http 8000
+# Note the HTTPS URL: https://xxxx-xx-xx-xx-xx.ngrok-free.app
+```
+
+Update `RESOURCE_SERVER_URL` in `.env` to the ngrok URL:
+
+```dotenv
+RESOURCE_SERVER_URL=https://xxxx-xx-xx-xx-xx.ngrok-free.app
+```
+
+Restart the server to pick up the new value, then add the connector in Claude.ai:
+
+1. Claude.ai → Settings → Integrations → **Add Integration**
+2. Type: **Remote MCP Server**
+3. URL: `https://xxxx-xx-xx-xx-xx.ngrok-free.app/mcp`
+4. OAuth Client ID: `oas-mcp` / OAuth Client Secret: *(from Keycloak)*
+
+See `oas_mcp/keycloak_auth_setup.md` step 10 for the full walkthrough including
+Keycloak Standard flow setup and test user creation.
+
+> **ngrok URL changes on every restart.** Update `RESOURCE_SERVER_URL`, restart
+> the server, and update the Claude.ai connector URL each time. A paid ngrok plan
+> gives a stable custom domain.
+
+#### Step 5 — (Optional) Enable Keycloak authentication
 
 Copy `env.example` to `.env` and fill in your Keycloak details:
 
@@ -266,7 +302,7 @@ You should receive an SSE response containing `serverInfo: {name: "OpenAeroStruc
 
 #### Step 4 — Connect from Claude Desktop (HTTP mode)
 
-**Windows with WSL** — Node.js on Windows has PATH and spaces-in-path issues when invoked directly from Claude Desktop. Run `npx mcp-remote` inside WSL instead (adjust the `PATH` export to match `which npx` in your WSL terminal):
+**Windows with WSL** — use the absolute path to `npx` inside WSL. Do not use `export PATH=.../bin:$PATH` — the inherited Windows `PATH` has entries with spaces (`Program Files`) that cause bash to misparse the `export` command. Use `which npx` in your WSL terminal to find the correct absolute path:
 
 ```json
 {
@@ -275,7 +311,7 @@ You should receive an SSE response containing `serverInfo: {name: "OpenAeroStruc
       "command": "wsl",
       "args": [
         "bash", "-c",
-        "export PATH=/home/alex/.nvm/versions/node/v24.12.0/bin:$PATH; exec npx -y mcp-remote http://localhost:8000/mcp"
+        "/home/alex/.nvm/versions/node/v24.12.0/bin/npx -y mcp-remote http://localhost:8000/mcp"
       ]
     }
   }
@@ -295,7 +331,7 @@ You should receive an SSE response containing `serverInfo: {name: "OpenAeroStruc
 }
 ```
 
-If Keycloak auth is enabled, append `--header 'Authorization: Bearer <eyJ...token>'` to the args. See `oas_mcp/keycloak_auth_setup.md` step 8 for how to fetch a token.
+If Keycloak auth is enabled, see `oas_mcp/keycloak_auth_setup.md` step 9 for Claude Desktop auth options (stdio recommended for local dev; mcp-remote with OAuth or dynamic token fetch for HTTP).
 
 #### Customise the Docker deployment
 

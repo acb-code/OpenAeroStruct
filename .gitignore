@@ -30,3 +30,5 @@ openaerostruct.egg-info/
 *.plt
 oas_data/artifacts/
 !oas_data/.keep
+*.env
+*.env.local

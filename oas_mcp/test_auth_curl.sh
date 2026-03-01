@@ -34,6 +34,7 @@ fi
 OAS_HOST="${OAS_HOST:-127.0.0.1}"
 OAS_PORT="${OAS_PORT:-8000}"
 SERVER_URL="http://${OAS_HOST}:${OAS_PORT}/mcp"
+SERVER_URL_BASE="http://${OAS_HOST}:${OAS_PORT}"
 
 KC="${KEYCLOAK_ISSUER_URL:-}"
 CLIENT_ID="${KEYCLOAK_CLIENT_ID:-oas-mcp}"
@@ -101,6 +102,25 @@ if ! curl -sf -o /dev/null --max-time 5 -X POST "${MCP_HEADERS[@]}" -d "$MCP_INI
 fi
 green "Server is reachable."
 echo ""
+
+# ---------------------------------------------------------------------------
+# Test 0 — OAuth metadata endpoints (only when auth is enabled)
+# ---------------------------------------------------------------------------
+if [[ -n "$KC" ]]; then
+    bold "--- Test 0: OAuth metadata endpoints ---"
+
+    # a) Verify 401 response includes resource_metadata in WWW-Authenticate header
+    HEADERS=$(curl -sD - -o /dev/null --max-time 10 \
+        -X POST "${MCP_HEADERS[@]}" -d "$MCP_INIT_BODY" "$SERVER_URL")
+    assert_contains "401 includes resource_metadata" "resource_metadata=" "$HEADERS"
+
+    # b) Fetch protected resource metadata document
+    PRM=$(curl -s --max-time 10 "$SERVER_URL_BASE/.well-known/oauth-protected-resource")
+    assert_contains "PRM has authorization_servers" "$KC" "$PRM"
+    assert_contains "PRM has scopes_supported: mcp:tools" "mcp:tools" "$PRM"
+
+    echo ""
+fi
 
 # ---------------------------------------------------------------------------
 # Test 1 — unauthenticated request
