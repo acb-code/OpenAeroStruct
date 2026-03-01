@@ -200,13 +200,23 @@ import base64, json, sys
 payload = sys.argv[1].split('.')[1]
 payload += '=' * (4 - len(payload) % 4)
 c = json.loads(base64.b64decode(payload))
-aud = c.get('aud', '(missing)')
+aud       = c.get('aud', '(missing)')
+iss       = c.get('iss', '(missing)')
 client_id = sys.argv[2]
+kc_url    = sys.argv[3].rstrip('/')
+RED, RST  = '\033[31m', '\033[0m'
+
 if aud != client_id and (not isinstance(aud, list) or client_id not in aud):
-    print(f'  \033[31m  aud claim is {repr(aud)!s} but server expects {repr(client_id)!s}\033[0m')
-    print(f'  \033[31m  Fix: add an Audience mapper in Keycloak → Clients → oas-mcp → Client scopes\033[0m')
-    print(f'  \033[31m       → oas-mcp-dedicated → Add mapper → Audience → Included Client Audience = {client_id}\033[0m')
-" "$TOKEN" "$CLIENT_ID"
+    print(f'{RED}  aud claim is {aud!r} but server expects {client_id!r}{RST}')
+    print(f'{RED}  Fix: Keycloak → Clients → {client_id} → Client scopes{RST}')
+    print(f'{RED}       → {client_id}-dedicated → Add mapper → Audience{RST}')
+    print(f'{RED}       → Included Client Audience = {client_id}{RST}')
+
+if iss != kc_url:
+    print(f'{RED}  iss claim is {iss!r}{RST}')
+    print(f'{RED}  but KEYCLOAK_ISSUER_URL is {kc_url!r}{RST}')
+    print(f'{RED}  The server was likely started before .env was updated — restart it.{RST}')
+" "$TOKEN" "$CLIENT_ID" "$KC"
             ((FAIL++)) || true
         else
             green "  PASS  valid token → serverInfo in response"
