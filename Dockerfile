@@ -11,9 +11,8 @@ WORKDIR /app
 
 COPY . .
 
-# Install the package with MCP dependencies
-# Use [http] instead of [mcp] when OAS_TRANSPORT=http is needed
-RUN pip install --no-cache-dir ".[mcp]"
+# Install the package with MCP + HTTP transport dependencies (uvicorn, PyJWT, httpx)
+RUN pip install --no-cache-dir ".[http]"
 
 # Artifact storage location inside the container
 ENV OAS_DATA_DIR=/data/artifacts

@@ -31,6 +31,7 @@ from .core.results import (
     extract_stability_results,
 )
 from .core.artifacts import ArtifactStore
+from .core.auth import build_auth_settings, build_token_verifier
 from .core.session import SessionManager
 from .core.validators import (
     validate_fem_model_type,
@@ -43,6 +44,8 @@ from .core.validators import (
 
 mcp = FastMCP(
     "OpenAeroStruct",
+    auth=build_auth_settings(),
+    token_verifier=build_token_verifier(),
     instructions="""OpenAeroStruct aerostructural analysis and optimisation server.
 
 REQUIRED WORKFLOW — always follow this order:
@@ -1291,10 +1294,49 @@ def main():
                 "Install it with: pip install 'openaerostruct[http]'"
             ) from exc
 
+        _warn_if_unauthenticated(args.host, args.port)
         app = mcp.streamable_http_app()
         uvicorn.run(app, host=args.host, port=args.port)
     else:
         mcp.run()
+
+
+def _warn_if_unauthenticated(host: str, port: int) -> None:
+    """Print a loud warning to stderr when HTTP transport runs without auth."""
+    import sys
+
+    from .core.auth import KEYCLOAK_ISSUER_URL
+
+    if KEYCLOAK_ISSUER_URL:
+        print(
+            f"\n  OAS MCP — HTTP transport  |  auth: Keycloak ({KEYCLOAK_ISSUER_URL})\n",
+            file=sys.stderr,
+        )
+        return
+
+    url = f"http://{host}:{port}/mcp"
+    print(
+        "\n"
+        "╔══════════════════════════════════════════════════════════════════╗\n"
+        "║                  ⚠  NO AUTHENTICATION ENABLED  ⚠                ║\n"
+        "╠══════════════════════════════════════════════════════════════════╣\n"
+        "║  The server is accepting ALL requests on:                        ║\n"
+        f"║    {url:<60}  ║\n"
+        "║                                                                  ║\n"
+        "║  Anyone who can reach this port can call every tool, run         ║\n"
+        "║  optimizations, and read/delete all stored artifacts.            ║\n"
+        "║                                                                  ║\n"
+        "║  This is fine for local development.  For any deployment that    ║\n"
+        "║  is reachable over a network, set:                               ║\n"
+        "║                                                                  ║\n"
+        "║    KEYCLOAK_ISSUER_URL=https://<your-kc>/realms/<realm>          ║\n"
+        "║    KEYCLOAK_CLIENT_ID=oas-mcp                                    ║\n"
+        "║    KEYCLOAK_CLIENT_SECRET=<secret>                               ║\n"
+        "║                                                                  ║\n"
+        "║  See oas_mcp/keycloak_auth_setup.md for the full setup guide.    ║\n"
+        "╚══════════════════════════════════════════════════════════════════╝\n",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":

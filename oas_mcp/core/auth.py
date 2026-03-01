@@ -94,11 +94,22 @@ class KeycloakTokenVerifier:
     # MCP TokenVerifier protocol
     # ------------------------------------------------------------------
 
-    async def verify_token(self, token: str) -> dict[str, Any]:
-        """Async wrapper around :meth:`verify` for FastMCP integration."""
+    async def verify_token(self, token: str) -> "AccessToken | None":
+        """Validate *token* and return an :class:`AccessToken`, or ``None`` on failure."""
         import asyncio
+        from mcp.server.auth.provider import AccessToken
 
-        return await asyncio.to_thread(self.verify, token)
+        try:
+            claims = await asyncio.to_thread(self.verify, token)
+        except Exception:
+            return None
+
+        return AccessToken(
+            token=token,
+            client_id=claims.get("azp") or claims.get("client_id", self._client_id),
+            scopes=claims.get("scope", "").split(),
+            expires_at=claims.get("exp"),
+        )
 
 
 def build_auth_settings() -> Any:
