@@ -1,0 +1,11 @@
+# Normalize line endings: LF in repo, checked out as LF on all platforms.
+* text=auto eol=lf
+
+# Shell scripts must always be LF — CRLF breaks bash on Linux/WSL.
+*.sh text eol=lf
+
+# Binary files — no line-ending conversion.
+*.png binary
+*.jpg binary
+*.pdf binary
+*.so  binary
