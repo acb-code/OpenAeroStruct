@@ -267,58 +267,43 @@ Location:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
-**Recommended — direct `url` connector (no mcp-remote, works on all platforms):**
+**Windows (WSL + mcp-remote) — with auth:**
+
+Node.js on Windows often has PATH or spaces-in-path issues when invoked
+directly from Claude Desktop. The reliable approach is to run `npx mcp-remote`
+inside WSL. Adjust the `PATH` export to match `which npx` in your WSL terminal.
 
 ```json
 {
   "mcpServers": {
     "openaerostruct": {
-      "url": "http://localhost:8000/mcp",
-      "headers": {
-        "Authorization": "Bearer <paste-eyJ...-token-here>"
-      }
-    }
-  }
-}
-```
-
-Replace `<paste-eyJ...-token-here>` with the token printed in step 1.
-
-**No auth (server running without Keycloak):**
-
-```json
-{
-  "mcpServers": {
-    "openaerostruct": {
-      "url": "http://localhost:8000/mcp"
-    }
-  }
-}
-```
-
-**Fallback — `mcp-remote` bridge (older Claude Desktop, or if `url` is unsupported):**
-
-On Windows, `npx` may fail if Node.js is installed in a path with spaces
-(e.g. `C:\Program Files\nodejs`). Use the full quoted path to `npx.cmd`:
-
-```json
-{
-  "mcpServers": {
-    "openaerostruct": {
-      "command": "cmd",
+      "command": "wsl",
       "args": [
-        "/c",
-        "\"C:\\Program Files\\nodejs\\npx.cmd\"",
-        "-y", "mcp-remote",
-        "http://localhost:8000/mcp",
-        "--header", "Authorization: Bearer <paste-eyJ...-token-here>"
+        "bash", "-c",
+        "export PATH=/home/alex/.nvm/versions/node/v24.12.0/bin:$PATH; exec npx -y mcp-remote http://localhost:8000/mcp --header 'Authorization: Bearer <paste-eyJ...-token-here>'"
       ]
     }
   }
 }
 ```
 
-On macOS/Linux the shorter form works fine:
+**Windows (WSL + mcp-remote) — no auth:**
+
+```json
+{
+  "mcpServers": {
+    "openaerostruct": {
+      "command": "wsl",
+      "args": [
+        "bash", "-c",
+        "export PATH=/home/alex/.nvm/versions/node/v24.12.0/bin:$PATH; exec npx -y mcp-remote http://localhost:8000/mcp"
+      ]
+    }
+  }
+}
+```
+
+**macOS / Linux — with auth:**
 
 ```json
 {
@@ -331,6 +316,8 @@ On macOS/Linux the shorter form works fine:
   }
 }
 ```
+
+Replace `<paste-eyJ...-token-here>` with the token printed in step 1.
 
 ### Step 3 — Restart Claude Desktop
 
