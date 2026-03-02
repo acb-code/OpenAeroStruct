@@ -52,6 +52,37 @@ def validate_surface_names_exist(names: list[str], session) -> None:
         )
 
 
+def validate_design_variables_for_surfaces(
+    design_variables: list[dict], surface_dicts: list[dict]
+) -> None:
+    """Ensure DV names are compatible with the fem_model_type of each surface.
+
+    Tube surfaces expose 'thickness_cp'; wingbox surfaces expose
+    'spar_thickness_cp' and 'skin_thickness_cp'.  Catching the mismatch
+    here produces a clear error rather than an opaque OpenMDAO KeyError.
+    """
+    tube_only = {"thickness"}
+    wingbox_only = {"spar_thickness", "skin_thickness"}
+
+    for surface in surface_dicts:
+        fem_type = surface.get("fem_model_type", "tube")
+        name = surface.get("name", "?")
+        for dv in design_variables:
+            dv_name = dv.get("name", "")
+            if fem_type == "wingbox" and dv_name in tube_only:
+                raise ValueError(
+                    f"Design variable {dv_name!r} maps to 'thickness_cp', which does not exist "
+                    f"for wingbox surface {name!r}. "
+                    f"Use 'spar_thickness' or 'skin_thickness' for wingbox models."
+                )
+            if fem_type != "wingbox" and dv_name in wingbox_only:
+                raise ValueError(
+                    f"Design variable {dv_name!r} is for wingbox surfaces only, "
+                    f"but surface {name!r} uses fem_model_type={fem_type!r}. "
+                    f"Use 'thickness' for tube models."
+                )
+
+
 def validate_struct_props_present(surface: dict) -> None:
     """Ensure structural properties are present for aerostruct analysis."""
     required = ["E", "G", "yield", "mrho", "fem_model_type"]

@@ -358,6 +358,28 @@ class TestRunOptimization:
                 constraints=[{"name": "mystery_output", "equals": 0.0}],
             )
 
+    async def test_thickness_dv_on_wingbox_raises(self, wingbox_wing):
+        """'thickness' maps to thickness_cp which doesn't exist on wingbox surfaces."""
+        with pytest.raises(ValueError, match="spar_thickness.*skin_thickness"):
+            await run_optimization(
+                surfaces=["wing"],
+                analysis_type="aerostruct",
+                objective="structural_mass",
+                design_variables=[{"name": "thickness", "lower": 0.001, "upper": 0.1}],
+                constraints=[{"name": "L_equals_W", "equals": 1.0}],
+            )
+
+    async def test_spar_thickness_dv_on_tube_raises(self, struct_wing):
+        """'spar_thickness' / 'skin_thickness' are wingbox-only DVs."""
+        with pytest.raises(ValueError, match="wingbox"):
+            await run_optimization(
+                surfaces=["wing"],
+                analysis_type="aerostruct",
+                objective="structural_mass",
+                design_variables=[{"name": "spar_thickness", "lower": 0.001, "upper": 0.05}],
+                constraints=[{"name": "L_equals_W", "equals": 1.0}],
+            )
+
 
 # ---------------------------------------------------------------------------
 # reset

@@ -104,6 +104,11 @@ ARTIFACT STORAGE (every analysis is automatically saved):
   • delete_artifact(run_id) — remove a saved artifact
   • oas://artifacts/{run_id} — resource access to any artifact by run_id
 
+DESIGN VARIABLE NAMES FOR run_optimization:
+  • All models:   'twist', 'chord', 'sweep', 'taper', 'alpha'
+  • Tube only:    'thickness'   (maps to thickness_cp — does NOT exist on wingbox surfaces)
+  • Wingbox only: 'spar_thickness', 'skin_thickness'  (do NOT use 'thickness' for wingbox)
+
 Use the prompts (analyze_wing, aerostructural_design, optimize_wing) for guided
 workflows, and the resources (oas://reference, oas://workflows) for quick lookup.""",
 )
@@ -715,11 +720,13 @@ async def run_optimization(
     varying the specified design variables.  Supports aero-only (VLM) and
     coupled aerostructural problems.
 
-    Design variable names: 'twist', 'thickness', 'chord', 'sweep', 'taper', 'alpha'
-    Constraint names (aero): 'CL', 'CD', 'CM'
-    Constraint names (aerostruct): all aero + 'failure', 'thickness_intersects', 'L_equals_W'
-    Objective names (aero): 'CD', 'CL'
-    Objective names (aerostruct): 'fuelburn', 'structural_mass', 'CD'
+    Design variable names (all models):   'twist', 'chord', 'sweep', 'taper', 'alpha'
+    Design variable names (tube only):    'thickness'
+    Design variable names (wingbox only): 'spar_thickness', 'skin_thickness'
+    Constraint names (aero):              'CL', 'CD', 'CM'
+    Constraint names (aerostruct):        all aero + 'failure', 'thickness_intersects', 'L_equals_W'
+    Objective names (aero):               'CD', 'CL'
+    Objective names (aerostruct):         'fuelburn', 'structural_mass', 'CD'
     """
     if design_variables is None:
         design_variables = [{"name": "alpha", "lower": -10.0, "upper": 15.0}]

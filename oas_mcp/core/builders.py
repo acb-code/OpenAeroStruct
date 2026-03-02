@@ -16,6 +16,7 @@ from openaerostruct.integration.aerostruct_groups import AerostructGeometry, Aer
 from openaerostruct.utils.constants import grav_constant
 
 from .connections import connect_aero_surface, connect_aerostruct_surface
+from .validators import validate_design_variables_for_surfaces
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +314,8 @@ def build_optimization_problem(
         )
         obj_map = OBJECTIVE_MAP_AEROSTRUCT
         con_map = CONSTRAINT_NAME_MAP_AEROSTRUCT
+
+    validate_design_variables_for_surfaces(design_variables, surfaces)
 
     primary_name = surfaces[0]["name"] if surfaces else "wing"
 
