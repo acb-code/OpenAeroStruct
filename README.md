@@ -1,6 +1,13 @@
 OpenAeroStruct
 ==============
 
+> ## **Fork Notice:**
+> This is a forked version of [OpenAeroStruct](https://github.com/mdolab/OpenAeroStruct) that extends the original framework with an MCP (Model Context Protocol) server layer, enabling direct access by agentic AI systems. By exposing aerodynamic and aerostructural analysis as MCP tools, AI agents can autonomously drive design exploration, optimization loops, and trade studies — significantly accelerating the analysis workflow and lowering the barrier to running complex multidisciplinary analyses.
+>
+> **Active areas of development in this fork:**
+> - **MCP Server** — An initial version is complete (`oas_mcp/`). Exposes core OAS capabilities (surface creation, aero/aerostruct analysis, drag polars, stability derivatives, optimization) as structured tools consumable by any MCP-compatible AI agent.
+> - **Visualization, Evaluation & Observability** *(TODO / In Progress)* — Tooling to help engineers inspect, guide, and understand analyses being run by AI agents: result dashboards, run histories, decision traces, and human-in-the-loop review points.
+
 [![Build Status](https://dev.azure.com/mdolab/Public/_apis/build/status%2Fmdolab.OpenAeroStruct?repoName=mdolab%2FOpenAeroStruct&branchName=main)](https://dev.azure.com/mdolab/Public/_build/latest?definitionId=49&repoName=mdolab%2FOpenAeroStruct&branchName=main)
 [![codecov](https://codecov.io/gh/mdolab/OpenAeroStruct/branch/main/graph/badge.svg?token=yOxeH7rT2H)](https://codecov.io/gh/mdolab/OpenAeroStruct)
 [![Documentation Status](https://readthedocs.com/projects/mdolab-openaerostruct/badge/?version=latest)](https://mdolab-openaerostruct.readthedocs-hosted.com/en/latest/?badge=latest)
