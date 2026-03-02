@@ -32,7 +32,14 @@ from .core.builders import (
     build_aerostruct_problem,
     build_optimization_problem,
 )
-from .core.defaults import DEFAULT_AEROSTRUCT_CONDITIONS, DEFAULT_AERO_CONDITIONS
+from .core.defaults import (
+    DEFAULT_AEROSTRUCT_CONDITIONS,
+    DEFAULT_AERO_CONDITIONS,
+    DEFAULT_WINGBOX_UPPER_X,
+    DEFAULT_WINGBOX_UPPER_Y,
+    DEFAULT_WINGBOX_LOWER_X,
+    DEFAULT_WINGBOX_LOWER_Y,
+)
 from .core.mesh import apply_dihedral, apply_sweep, apply_taper, build_mesh
 from .core.results import (
     extract_aero_results,
@@ -139,7 +146,10 @@ async def create_surface(
     with_viscous: Annotated[bool, "Include viscous (skin-friction) drag"] = True,
     with_wave: Annotated[bool, "Include wave drag"] = False,
     fem_model_type: Annotated[str | None, "Structural model: 'tube', 'wingbox', or None for aero-only"] = None,
-    thickness_cp: Annotated[list[float] | None, "Tube wall thickness control points in metres"] = None,
+    thickness_cp: Annotated[list[float] | None, "Tube wall thickness control points in metres (tube model only)"] = None,
+    spar_thickness_cp: Annotated[list[float] | None, "Wingbox spar thickness control points in metres (wingbox model only)"] = None,
+    skin_thickness_cp: Annotated[list[float] | None, "Wingbox skin thickness control points in metres (wingbox model only)"] = None,
+    original_wingbox_airfoil_t_over_c: Annotated[float, "Thickness-to-chord ratio of the reference airfoil used for wingbox cross-section geometry (wingbox model only)"] = 0.12,
     E: Annotated[float, "Young's modulus in Pa (default: aluminium 7075, 70 GPa)"] = 70.0e9,
     G: Annotated[float, "Shear modulus in Pa (default: aluminium 7075, 30 GPa)"] = 30.0e9,
     yield_stress: Annotated[float, "Yield stress in Pa (default: 500 MPa)"] = 500.0e6,
@@ -224,13 +234,35 @@ async def create_surface(
             surface["distributed_fuel_weight"] = False
             surface["exact_failure_constraint"] = False
 
-            if thickness_cp is not None:
-                surface["thickness_cp"] = np.array(thickness_cp, dtype=float)
-            else:
-                # Default: 3 control points, 10% chord thickness
+            if fem_model_type == "wingbox":
+                # Wingbox-specific thickness control points
                 ny2 = (num_y + 1) // 2
-                n_cp = max(3, min(5, ny2 // 2))
-                surface["thickness_cp"] = np.ones(n_cp) * 0.1 * root_chord
+                n_cp = max(2, min(6, ny2 // 2))
+                surface["spar_thickness_cp"] = (
+                    np.array(spar_thickness_cp, dtype=float)
+                    if spar_thickness_cp is not None
+                    else np.linspace(0.004, 0.01, n_cp)
+                )
+                surface["skin_thickness_cp"] = (
+                    np.array(skin_thickness_cp, dtype=float)
+                    if skin_thickness_cp is not None
+                    else np.linspace(0.005, 0.026, n_cp)
+                )
+                # Airfoil geometry for wingbox cross-section calculations
+                surface["original_wingbox_airfoil_t_over_c"] = original_wingbox_airfoil_t_over_c
+                surface["strength_factor_for_upper_skin"] = 1.0
+                surface["data_x_upper"] = DEFAULT_WINGBOX_UPPER_X
+                surface["data_y_upper"] = DEFAULT_WINGBOX_UPPER_Y
+                surface["data_x_lower"] = DEFAULT_WINGBOX_LOWER_X
+                surface["data_y_lower"] = DEFAULT_WINGBOX_LOWER_Y
+            else:
+                # Tube model thickness control points
+                if thickness_cp is not None:
+                    surface["thickness_cp"] = np.array(thickness_cp, dtype=float)
+                else:
+                    ny2 = (num_y + 1) // 2
+                    n_cp = max(3, min(5, ny2 // 2))
+                    surface["thickness_cp"] = np.ones(n_cp) * 0.1 * root_chord
 
         return surface
 

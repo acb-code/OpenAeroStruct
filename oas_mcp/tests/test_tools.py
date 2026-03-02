@@ -75,6 +75,56 @@ class TestCreateSurface:
         with pytest.raises(ValueError, match="wing_type"):
             await create_surface(name="bad", wing_type="ellipse")
 
+    async def test_wingbox_surface_has_required_keys(self):
+        await create_surface(
+            name="wb", wing_type="rect", num_x=2, num_y=5,
+            fem_model_type="wingbox", E=73.1e9, G=27.5e9,
+            yield_stress=420e6, safety_factor=1.5, mrho=2.78e3,
+        )
+        from oas_mcp.server import _sessions
+        surf = _sessions.get("default").surfaces["wb"]
+        # Keys required by SectionPropertiesWingbox
+        assert "original_wingbox_airfoil_t_over_c" in surf
+        assert "data_x_upper" in surf
+        assert "data_y_upper" in surf
+        assert "data_x_lower" in surf
+        assert "data_y_lower" in surf
+        assert "spar_thickness_cp" in surf
+        assert "skin_thickness_cp" in surf
+
+    async def test_wingbox_surface_does_not_have_tube_keys(self):
+        await create_surface(
+            name="wb2", wing_type="rect", num_x=2, num_y=5,
+            fem_model_type="wingbox",
+        )
+        from oas_mcp.server import _sessions
+        surf = _sessions.get("default").surfaces["wb2"]
+        assert "thickness_cp" not in surf
+        assert "radius_cp" not in surf
+
+    async def test_wingbox_custom_spar_skin_thickness(self):
+        await create_surface(
+            name="wb3", wing_type="rect", num_x=2, num_y=5,
+            fem_model_type="wingbox",
+            spar_thickness_cp=[0.003, 0.005, 0.007],
+            skin_thickness_cp=[0.004, 0.008, 0.012],
+        )
+        from oas_mcp.server import _sessions
+        import numpy as np
+        surf = _sessions.get("default").surfaces["wb3"]
+        assert list(surf["spar_thickness_cp"]) == pytest.approx([0.003, 0.005, 0.007])
+        assert list(surf["skin_thickness_cp"]) == pytest.approx([0.004, 0.008, 0.012])
+
+    async def test_wingbox_t_over_c_custom(self):
+        await create_surface(
+            name="wb4", wing_type="rect", num_x=2, num_y=5,
+            fem_model_type="wingbox",
+            original_wingbox_airfoil_t_over_c=0.15,
+        )
+        from oas_mcp.server import _sessions
+        surf = _sessions.get("default").surfaces["wb4"]
+        assert surf["original_wingbox_airfoil_t_over_c"] == pytest.approx(0.15)
+
 
 # ---------------------------------------------------------------------------
 # run_aero_analysis
@@ -169,6 +219,28 @@ class TestRunAerostructAnalysis:
             await run_aerostruct_analysis(["wing"])
 
     async def test_cl_positive_at_positive_alpha(self, struct_wing):
+        r = await run_aerostruct_analysis(["wing"], alpha=5.0)
+        assert r["CL"] > 0
+
+    # --- wingbox model ---
+
+    async def test_wingbox_basic_results_structure(self, wingbox_wing):
+        r = await run_aerostruct_analysis(["wing"])
+        assert "CL" in r
+        assert "CD" in r
+        assert "fuelburn" in r
+        assert "structural_mass" in r
+        assert "L_equals_W" in r
+
+    async def test_wingbox_structural_mass_positive(self, wingbox_wing):
+        r = await run_aerostruct_analysis(["wing"])
+        assert r["structural_mass"] > 0
+
+    async def test_wingbox_failure_in_surface_results(self, wingbox_wing):
+        r = await run_aerostruct_analysis(["wing"])
+        assert "failure" in r["surfaces"]["wing"]
+
+    async def test_wingbox_cl_positive_at_positive_alpha(self, wingbox_wing):
         r = await run_aerostruct_analysis(["wing"], alpha=5.0)
         assert r["CL"] > 0
 

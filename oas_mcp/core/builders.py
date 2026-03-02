@@ -119,7 +119,12 @@ def _assemble_aerostruct_model(
     )
 
     for surface in surfaces:
-        connect_aerostruct_surface(prob.model, surface["name"], point_name)
+        connect_aerostruct_surface(
+            prob.model,
+            surface["name"],
+            point_name,
+            fem_model_type=surface.get("fem_model_type", "tube"),
+        )
 
     return point_name
 

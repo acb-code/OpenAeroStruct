@@ -35,6 +35,16 @@ SMALL_RECT_STRUCT = dict(
     thickness_cp=[0.05, 0.1, 0.05],
 )
 
+SMALL_RECT_WINGBOX = dict(
+    **SMALL_RECT,
+    fem_model_type="wingbox",
+    E=73.1e9,
+    G=27.5e9,
+    yield_stress=420.0e6,
+    safety_factor=1.5,
+    mrho=2.78e3,
+)
+
 
 @pytest.fixture(autouse=True)
 def isolate_artifacts(tmp_path):
@@ -64,4 +74,11 @@ async def aero_wing():
 async def struct_wing():
     """Create a small wing with structural properties."""
     await create_surface(**SMALL_RECT_STRUCT)
+    return "wing"
+
+
+@pytest_asyncio.fixture
+async def wingbox_wing():
+    """Create a small wing with wingbox structural properties."""
+    await create_surface(**SMALL_RECT_WINGBOX)
     return "wing"
