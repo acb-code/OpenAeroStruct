@@ -2,6 +2,56 @@
 
 This guide walks through deploying Keycloak, wiring it into the OAS MCP server, and connecting Claude Desktop or Claude.ai so every request is authenticated.
 
+---
+
+## Adding a new user (quick reference)
+
+Once the server and Keycloak are running, this is the complete checklist to onboard someone.
+
+### Step 1 — Create the user in Keycloak
+
+1. Go to the Keycloak admin console → `mcp-realm` → **Users** → **Add user**
+2. Set **Username** (e.g. their email address or first name)
+3. **Email verified**: ON
+4. Click **Create**
+5. Go to the **Credentials** tab → **Set password**
+6. Enter a temporary password → set **Temporary** to **OFF** → **Save password**
+
+### Step 2 — Send the user this information
+
+```
+OAS MCP Server — connection details
+
+Server URL:      https://<your-ngrok-url>/mcp
+OAuth Client ID: oas-mcp
+OAuth Client Secret: <paste the client secret from Keycloak → Clients → oas-mcp → Credentials>
+
+Your login credentials:
+  Username: <the username you set in step 1>
+  Password: <the password you set in step 1>
+```
+
+> Keep the client secret out of email if possible — send it via a password manager share or a secure channel.
+
+### Step 3 — User adds the connector in Claude.ai
+
+The user should:
+
+1. Open [claude.ai](https://claude.ai) → profile → **Settings** → **Integrations** → **Add Integration**
+2. Integration type: **Remote MCP Server**
+3. Fill in:
+   - **Name**: `OpenAeroStruct` (or any label)
+   - **Remote MCP Server URL**: `https://<your-ngrok-url>/mcp`
+   - **OAuth Client ID**: `oas-mcp`
+   - **OAuth Client Secret**: *(value you sent them)*
+4. Click **Save** — Claude.ai will redirect them to the Keycloak login page
+5. They log in with the username and password you provided
+6. The integration appears as connected and the OAS tools become available
+
+> **ngrok URL changes on every restart.** If you restart ngrok, send the user the new URL and they must update the connector's server URL in Claude.ai Settings → Integrations.
+
+---
+
 ## Table of Contents
 
 1. [Why auth matters](#1-why-auth-matters)
