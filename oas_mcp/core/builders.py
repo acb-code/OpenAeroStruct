@@ -248,7 +248,7 @@ OBJECTIVE_MAP_AERO = {
 
 OBJECTIVE_MAP_AEROSTRUCT = {
     "fuelburn": "{point}.fuelburn",
-    "structural_mass": "{point}.total_perf.structural_mass",
+    "structural_mass": "{name}.structural_mass",
     "CD": "{point}.{name}_perf.CD",
 }
 
