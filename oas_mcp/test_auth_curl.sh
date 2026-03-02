@@ -33,8 +33,11 @@ fi
 # ---------------------------------------------------------------------------
 OAS_HOST="${OAS_HOST:-127.0.0.1}"
 OAS_PORT="${OAS_PORT:-8000}"
-SERVER_URL="http://${OAS_HOST}:${OAS_PORT}/mcp"
-SERVER_URL_BASE="http://${OAS_HOST}:${OAS_PORT}"
+# OAS_HOST may be a bind-all address (0.0.0.0 / ::) — map to 127.0.0.1 for curl
+_CONNECT_HOST="$OAS_HOST"
+[[ "$_CONNECT_HOST" == "0.0.0.0" || "$_CONNECT_HOST" == "::" ]] && _CONNECT_HOST="127.0.0.1"
+SERVER_URL="http://${_CONNECT_HOST}:${OAS_PORT}/mcp"
+SERVER_URL_BASE="http://${_CONNECT_HOST}:${OAS_PORT}"
 
 KC="${KEYCLOAK_ISSUER_URL:-}"
 CLIENT_ID="${KEYCLOAK_CLIENT_ID:-oas-mcp}"

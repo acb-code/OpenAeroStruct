@@ -55,6 +55,10 @@ mcp = FastMCP(
     "OpenAeroStruct",
     auth=build_auth_settings(),
     token_verifier=build_token_verifier(),
+    # Pass host at construction time so FastMCP configures DNS rebinding protection
+    # correctly.  When host="0.0.0.0" FastMCP skips the localhost-only allowlist,
+    # which is required for ngrok (requests arrive with Host: <ngrok-url>).
+    host=os.environ.get("OAS_HOST", "127.0.0.1"),
     instructions="""OpenAeroStruct aerostructural analysis and optimisation server.
 
 REQUIRED WORKFLOW — always follow this order:

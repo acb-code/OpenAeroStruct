@@ -106,6 +106,23 @@ Clients are applications that request tokens. Create one client that the OAS ser
 
 5. Go to the **Credentials** tab → copy the **Client secret** — you will need it shortly.
 
+### 4a. Add the audience mapper (required)
+
+By default Keycloak tokens do **not** include the client ID in the `aud` claim.
+The OAS MCP server's JWT verifier requires `aud: "oas-mcp"` in every token.
+Without this mapper, all requests return `401` even with a valid token.
+
+1. Still in the `oas-mcp` client → go to the **Client scopes** tab
+2. Click **oas-mcp-dedicated** (the auto-created dedicated scope)
+3. Click **Add mapper** → **By configuration** → **Audience**
+4. Fill in:
+   - Name: `oas-mcp-audience`
+   - Included Client Audience: `oas-mcp`
+   - Add to access token: **ON**
+5. Click **Save**
+
+All tokens issued to `oas-mcp` will now include `"aud": "oas-mcp"`.
+
 ---
 
 ## 5. Create the `mcp:tools` scope
@@ -413,8 +430,22 @@ ngrok authtoken <your-ngrok-token>
 
 ```bash
 cd /home/alex/coding/OpenAeroStruct
+# Ensure .env has OAS_HOST=0.0.0.0  (required for ngrok — see note below)
 .venv/bin/python3.11 -m oas_mcp.server --transport http
 ```
+
+> **Why `OAS_HOST=0.0.0.0`?**
+> FastMCP reads `OAS_HOST` at startup and passes it to its own constructor.
+> When the host is `127.0.0.1` (the default), FastMCP **automatically enables
+> DNS rebinding protection** with `allowed_hosts=["127.0.0.1:*", "localhost:*"]`.
+> ngrok forwards requests with `Host: xxxx.ngrok-free.dev`, which fails this
+> check and returns **421 Misdirected Request** — Claude.ai reports this as
+> "There was an error connecting to the MCP server."
+>
+> Setting `OAS_HOST=0.0.0.0` tells FastMCP the server is listening on all
+> interfaces, so it skips the localhost-only restriction and accepts any
+> `Host` header. ngrok still tunnels to localhost internally — no extra
+> network exposure beyond the ngrok tunnel itself.
 
 ### Step 3 — Expose the server with ngrok
 
@@ -774,6 +805,55 @@ bash to misparse the space-separated fragments as separate `export` arguments.
 ```
 
 Find the correct absolute path with `which npx` in your WSL terminal. This is the same pattern the working stdio config uses for python.
+
+---
+
+### Claude.ai: "There was an error connecting to the MCP server … handles auth correctly"
+
+This error appears when Claude.ai tries to connect during integration setup. Work
+through these checks in order:
+
+**Check 1 — DNS rebinding protection (most common cause with ngrok)**
+
+The server passes `OAS_HOST` to the `FastMCP()` constructor at startup. When
+`OAS_HOST=127.0.0.1`, FastMCP auto-enables host-header validation with
+`allowed_hosts=["127.0.0.1:*", "localhost:*"]`. ngrok sends
+`Host: xxxx.ngrok-free.dev`, which doesn't match and returns **421 Misdirected
+Request** before auth middleware even runs. Claude.ai reports this as a
+connection error.
+
+Fix: set `OAS_HOST=0.0.0.0` in `.env` and **restart the server**. With
+`0.0.0.0`, FastMCP skips the localhost-only restriction entirely.
+
+**Check 2 — Server not restarted after `.env` change**
+
+Run:
+```bash
+curl -s https://<ngrok-url>/.well-known/oauth-protected-resource | python3 -m json.tool
+```
+The `"resource"` field must be the ngrok URL. If it shows `http://localhost:8000`
+the server is still using old env vars — restart it.
+
+**Check 3 — Audience mapper missing**
+
+Run the diagnostic commands from [step 12](#12-verify-auth-end-to-end) with a
+real token. If the token has `aud: "account"` or no `aud` field, the audience
+mapper hasn't been added. Follow step [4a](#4a-add-the-audience-mapper-required).
+
+**Check 4 — ngrok tunnel not running / URL expired**
+
+```bash
+curl -sv https://<ngrok-url>/mcp 2>&1 | grep "< HTTP"
+# Should return: HTTP/2 401 (or HTTP/2 421 if OAS_HOST is still 127.0.0.1)
+# If you get a connection error: start ngrok (ngrok http 8000)
+```
+
+**Check 5 — Keycloak unreachable**
+
+```bash
+curl -s https://<keycloak>/realms/mcp-realm/.well-known/openid-configuration | python3 -m json.tool
+# Should return Keycloak's OIDC discovery document
+```
 
 ---
 
