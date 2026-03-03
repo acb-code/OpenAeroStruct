@@ -237,6 +237,7 @@ CONSTRAINT_NAME_MAP_AEROSTRUCT = {
     "CD": "{point}.{name}_perf.CD",
     "CM": "{point}.CM",
     "failure": "{point}.{name}_perf.failure",
+    # thickness_intersects is tube-only — raises ValueError for wingbox surfaces
     "thickness_intersects": "{point}.{name}_perf.thickness_intersects",
     "L_equals_W": "{point}.L_equals_W",
 }
@@ -324,7 +325,13 @@ def build_optimization_problem(
         dv_name = dv["name"]
         template = DV_NAME_MAP.get(dv_name)
         if template is None:
-            raise ValueError(f"Unknown design variable {dv_name!r}. Options: {list(DV_NAME_MAP)}")
+            # Accept _cp-suffixed names as aliases (e.g. twist_cp → twist)
+            if dv_name.endswith("_cp"):
+                template = DV_NAME_MAP.get(dv_name[:-3])
+            if template is None:
+                raise ValueError(
+                    f"Unknown design variable {dv_name!r}. Options: {list(DV_NAME_MAP)}"
+                )
         path = resolve_path(template, primary_name, point_name)
         kwargs = {}
         if "lower" in dv:
@@ -341,6 +348,14 @@ def build_optimization_problem(
         template = con_map.get(con_name)
         if template is None:
             raise ValueError(f"Unknown constraint {con_name!r}. Options: {list(con_map)}")
+        if con_name == "thickness_intersects":
+            wingbox_surfs = [s["name"] for s in surfaces if s.get("fem_model_type") == "wingbox"]
+            if wingbox_surfs:
+                raise ValueError(
+                    f"Constraint 'thickness_intersects' is only available for tube "
+                    f"fem_model_type surfaces. Surface(s) {wingbox_surfs} use 'wingbox'. "
+                    f"Remove 'thickness_intersects' from constraints for wingbox optimizations."
+                )
         path = resolve_path(template, primary_name, point_name)
         kwargs = {}
         if "equals" in con:

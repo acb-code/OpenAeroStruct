@@ -1,7 +1,9 @@
 """Matplotlib-based plot generation for OAS MCP results.
 
-All plots return base64-encoded PNG bytes and a SHA-256 hash for
-client-side caching and deduplication.
+All plots return an ``mcp.server.fastmcp.utilities.types.Image`` object that
+FastMCP auto-converts to ``ImageContent`` in the MCP response.  A SHA-256
+hash is embedded in the Image object's ``_hash`` attribute for client-side
+caching (accessible via ``img._hash``).
 
 Supported plot types (strict enum)
 -----------------------------------
@@ -10,6 +12,9 @@ Supported plot types (strict enum)
   "stress_distribution" — spanwise von Mises stress
   "convergence"         — solver residual vs iteration (if trace available)
   "planform"            — wing planform + deflection overlay
+  "opt_history"         — optimizer objective convergence history
+  "opt_dv_evolution"    — design variable evolution over optimizer iterations
+  "opt_comparison"      — before/after DV comparison (initial vs optimized)
 
 All plots include:
   - Axes labels with units
@@ -21,12 +26,13 @@ Standard pixel dimensions: 900 × 540 px at 150 dpi
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import io
 from typing import Any
 
 import numpy as np
+
+from mcp.server.fastmcp.utilities.types import Image
 
 # Lazy matplotlib import — avoid importing at module load to keep startup fast.
 _MPL_AVAILABLE: bool | None = None
@@ -64,6 +70,9 @@ PLOT_TYPES = frozenset({
     "stress_distribution",
     "convergence",
     "planform",
+    "opt_history",
+    "opt_dv_evolution",
+    "opt_comparison",
 })
 
 _FIG_WIDTH_IN = 6.0   # inches
@@ -76,25 +85,23 @@ _DPI = 150            # → 900 × 540 px
 # ---------------------------------------------------------------------------
 
 
-def _fig_to_response(fig, run_id: str, plot_type: str) -> dict:
-    """Convert a matplotlib Figure to a response dict with base64 PNG."""
+def _fig_to_response(fig, run_id: str, plot_type: str) -> Image:
+    """Convert a matplotlib Figure to an MCP Image object.
+
+    FastMCP auto-converts ``Image`` returns to ``ImageContent``, so the plot
+    is delivered as a proper image attachment rather than raw base64 text.
+    The SHA-256 hash is stored on ``img._hash`` for client-side caching.
+    """
     _, plt = _require_mpl()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     png_bytes = buf.read()
-    b64 = base64.b64encode(png_bytes).decode("ascii")
     sha = "sha256-" + hashlib.sha256(png_bytes).hexdigest()[:16]
-    return {
-        "plot_type": plot_type,
-        "run_id": run_id,
-        "format": "png",
-        "width_px": int(_FIG_WIDTH_IN * _DPI),
-        "height_px": int(_FIG_HEIGHT_IN * _DPI),
-        "image_hash": sha,
-        "image_base64": b64,
-    }
+    img = Image(data=png_bytes, format="png")
+    img._hash = sha  # type: ignore[attr-defined]
+    return img
 
 
 def _make_fig(run_id: str, title: str) -> tuple:
@@ -391,6 +398,192 @@ def plot_planform(run_id: str, mesh_data: dict, case_name: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Plot: opt_history
+# ---------------------------------------------------------------------------
+
+
+def plot_opt_history(run_id: str, optimization_history: dict, case_name: str = "") -> Image:
+    """Plot optimizer objective convergence history.
+
+    Shows the objective value per optimizer iteration.  If only initial and
+    final values are available (no per-iteration trace), displays a two-point
+    comparison.
+
+    Parameters
+    ----------
+    optimization_history:
+        Dict from ``results.optimization_history`` with keys:
+        ``objective_values`` (list[float]), ``num_iterations`` (int),
+        ``initial_dvs`` (dict).
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    title = f"Objective Convergence — {case_name}" if case_name else "Objective Convergence"
+    fig, ax = _make_fig(run_id, title)
+
+    obj_vals = optimization_history.get("objective_values", [])
+    n_iter = optimization_history.get("num_iterations", 0)
+
+    if obj_vals and len(obj_vals) > 1:
+        iters = list(range(len(obj_vals)))
+        ax.plot(iters, obj_vals, "b-o", markersize=4, linewidth=1.5)
+        ax.set_xlabel("Optimizer iteration  [—]")
+        ax.set_ylabel("Objective value  [—]")
+        pct = 100.0 * (obj_vals[-1] - obj_vals[0]) / max(abs(obj_vals[0]), 1e-300)
+        ax.set_title(
+            f"Initial: {obj_vals[0]:.4g}   Final: {obj_vals[-1]:.4g}   "
+            f"Change: {pct:+.1f}%",
+            fontsize=8,
+        )
+    elif obj_vals:
+        # Only one point recorded — show as a single marker with annotation
+        ax.plot([0], obj_vals[:1], "bo", markersize=8)
+        ax.set_xlabel("Optimizer iteration  [—]")
+        ax.set_ylabel("Objective value  [—]")
+        ax.set_title(f"Recorded: {obj_vals[0]:.4g}  (n_iter={n_iter})", fontsize=8)
+    else:
+        # No per-iteration data — show summary text
+        msg = (
+            f"No per-iteration objective trace captured.\n"
+            f"Optimizer iterations: {n_iter}\n\n"
+            "Run with a SqliteRecorder-enabled build to capture full history."
+        )
+        ax.text(0.5, 0.5, msg, transform=ax.transAxes,
+                ha="center", va="center", fontsize=9, color="gray",
+                bbox={"facecolor": "lightyellow", "alpha": 0.8, "edgecolor": "gray"})
+        ax.axis("off")
+
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    return _fig_to_response(fig, run_id, "opt_history")
+
+
+# ---------------------------------------------------------------------------
+# Plot: opt_dv_evolution
+# ---------------------------------------------------------------------------
+
+
+def plot_opt_dv_evolution(run_id: str, optimization_history: dict, case_name: str = "") -> Image:
+    """Plot design variable evolution over optimizer iterations.
+
+    For vector DVs (e.g. twist_cp), plots the mean of the DV vector per
+    iteration.  For scalar DVs, plots the scalar value directly.
+
+    Parameters
+    ----------
+    optimization_history:
+        Dict from ``results.optimization_history`` with key
+        ``dv_history`` (dict of DV name -> list of per-iteration values).
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    title = f"DV Evolution — {case_name}" if case_name else "Design Variable Evolution"
+    fig, ax = _make_fig(run_id, title)
+
+    dv_history = optimization_history.get("dv_history", {})
+
+    if not dv_history:
+        # Fall back to showing initial vs final values
+        initial = optimization_history.get("initial_dvs", {})
+        # Try to get final from dv_history or signal absence
+        ax.text(0.5, 0.5, "No per-iteration DV history captured.\n"
+                "Use opt_comparison to see initial vs final values.",
+                transform=ax.transAxes, ha="center", va="center",
+                fontsize=9, color="gray")
+        ax.axis("off")
+        fig.tight_layout(rect=[0, 0, 1, 0.93])
+        return _fig_to_response(fig, run_id, "opt_dv_evolution")
+
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for idx, (dv_name, history) in enumerate(dv_history.items()):
+        if not history:
+            continue
+        color = colors[idx % len(colors)]
+        iters = list(range(len(history)))
+        # history[i] is either a scalar or a list (vector DV)
+        try:
+            means = [float(np.asarray(v).mean()) for v in history]
+        except Exception:
+            continue
+        label = dv_name
+        if isinstance(history[0], list) and len(history[0]) > 1:
+            label = f"{dv_name} (mean)"
+        ax.plot(iters, means, "-o", markersize=3, linewidth=1.5, label=label, color=color)
+
+    ax.set_xlabel("Optimizer iteration  [—]")
+    ax.set_ylabel("DV value  [various units]")
+    ax.set_title(f"{len(dv_history)} design variable(s)", fontsize=8)
+    ax.legend(fontsize=7, loc="best")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    return _fig_to_response(fig, run_id, "opt_dv_evolution")
+
+
+# ---------------------------------------------------------------------------
+# Plot: opt_comparison
+# ---------------------------------------------------------------------------
+
+
+def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str = "") -> Image:
+    """Plot before/after comparison of design variable values.
+
+    Generates a grouped bar chart with one group per DV, showing the initial
+    value (or mean for vector DVs) alongside the final optimized value.
+
+    Parameters
+    ----------
+    optimization_history:
+        Dict from ``results.optimization_history`` with keys:
+        ``initial_dvs`` (dict) and ``final_dvs`` (dict).
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    title = f"Before/After DV Comparison — {case_name}" if case_name else "Before/After DV Comparison"
+    fig, ax = _make_fig(run_id, title)
+
+    initial = optimization_history.get("initial_dvs", {})
+    final = optimization_history.get("final_dvs", {})
+
+    # Merge keys from both dicts
+    all_dvs = list({**initial, **final}.keys())
+
+    if not all_dvs:
+        ax.text(0.5, 0.5, "No initial/final DV data available.",
+                transform=ax.transAxes, ha="center", va="center",
+                fontsize=10, color="gray")
+        ax.axis("off")
+        fig.tight_layout(rect=[0, 0, 1, 0.93])
+        return _fig_to_response(fig, run_id, "opt_comparison")
+
+    def _scalar_mean(v) -> float:
+        """Reduce a DV value (scalar or vector) to a representative float."""
+        arr = np.asarray(v).ravel()
+        return float(arr.mean())
+
+    init_vals = [_scalar_mean(initial[k]) if k in initial else float("nan") for k in all_dvs]
+    final_vals = [_scalar_mean(final[k]) if k in final else float("nan") for k in all_dvs]
+
+    x = np.arange(len(all_dvs))
+    width = 0.35
+    bars_i = ax.bar(x - width / 2, init_vals, width, label="Initial", color="steelblue",
+                    edgecolor="navy", linewidth=0.8, alpha=0.85)
+    bars_f = ax.bar(x + width / 2, final_vals, width, label="Optimized", color="darkorange",
+                    edgecolor="saddlebrown", linewidth=0.8, alpha=0.85)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(all_dvs, rotation=15, ha="right", fontsize=8)
+    ax.set_ylabel("DV value (mean)  [various units]")
+    ax.set_title("Mean DV value: initial vs optimized", fontsize=8)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    return _fig_to_response(fig, run_id, "opt_comparison")
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -402,8 +595,9 @@ def generate_plot(
     convergence_data: dict | None = None,
     mesh_data: dict | None = None,
     case_name: str = "",
-) -> dict:
-    """Generate a plot and return a response dict with base64 PNG.
+    optimization_history: dict | None = None,
+) -> Image:
+    """Generate a plot and return an MCP Image object.
 
     Parameters
     ----------
@@ -419,11 +613,15 @@ def generate_plot(
         Mesh dict — required for "planform" plot type.
     case_name:
         Human-readable label for the plot title.
+    optimization_history:
+        Optimization history dict — required for opt_history, opt_dv_evolution,
+        and opt_comparison plot types.
 
     Returns
     -------
-    dict with ``plot_type``, ``run_id``, ``format``, ``width_px``,
-    ``height_px``, ``image_hash``, ``image_base64``.
+    ``mcp.server.fastmcp.utilities.types.Image`` — FastMCP auto-converts this
+    to ``ImageContent`` so the plot is delivered as a proper image attachment.
+    The SHA-256 hash is on ``img._hash`` for client-side caching.
     """
     if plot_type not in PLOT_TYPES:
         raise ValueError(
@@ -441,5 +639,11 @@ def generate_plot(
         return plot_convergence(run_id, convergence_data or {}, case_name)
     elif plot_type == "planform":
         return plot_planform(run_id, mesh_data or {}, case_name)
+    elif plot_type == "opt_history":
+        return plot_opt_history(run_id, optimization_history or {}, case_name)
+    elif plot_type == "opt_dv_evolution":
+        return plot_opt_dv_evolution(run_id, optimization_history or {}, case_name)
+    elif plot_type == "opt_comparison":
+        return plot_opt_comparison(run_id, optimization_history or {}, case_name)
     else:
         raise ValueError(f"Unhandled plot_type: {plot_type!r}")

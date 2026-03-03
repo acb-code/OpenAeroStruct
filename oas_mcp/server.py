@@ -27,6 +27,7 @@ from typing import Annotated, Any
 
 import numpy as np
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.utilities.types import Image
 
 from .core.builders import (
     build_aero_problem,
@@ -116,8 +117,9 @@ OBSERVABILITY TOOLS:
   • pin_run(run_id, surfaces, type)    — prevent cache eviction during multi-step workflows
   • unpin_run(run_id)                  — release pin when done
   • get_detailed_results(run_id, lvl)  — "standard" = sectional data; "full" = raw arrays
-  • visualize(run_id, plot_type)       — base64 PNG: lift_distribution, drag_polar,
-                                         stress_distribution, convergence, planform
+  • visualize(run_id, plot_type)       — ImageContent: lift_distribution, drag_polar,
+                                         stress_distribution, convergence, planform,
+                                         opt_history, opt_dv_evolution, opt_comparison
   • get_last_logs(run_id)              — server-side log records for debugging
   • configure_session(session_id, ...) — set per-session defaults (detail level, auto-plots, etc.)
 
@@ -146,8 +148,13 @@ ARTIFACT STORAGE (every analysis is automatically saved):
 
 DESIGN VARIABLE NAMES FOR run_optimization:
   • All models:   'twist', 'chord', 'sweep', 'taper', 'alpha'
+    Note: '_cp' suffix is accepted as an alias (e.g. 'twist_cp' → 'twist')
   • Tube only:    'thickness'   (maps to thickness_cp — does NOT exist on wingbox surfaces)
   • Wingbox only: 'spar_thickness', 'skin_thickness'  (do NOT use 'thickness' for wingbox)
+
+CONSTRAINT NAMES FOR run_optimization:
+  • All aerostruct: 'CL', 'CD', 'CM', 'failure', 'L_equals_W'
+  • Tube only:      'thickness_intersects'  (NOT available for wingbox — raises an error)
 
 Use the prompts (analyze_wing, aerostructural_design, optimize_wing) for guided
 workflows, and the resources (oas://reference, oas://workflows) for quick lookup.""",
@@ -164,6 +171,60 @@ def _suppress_output(func, *args, **kwargs):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             return func(*args, **kwargs)
+
+
+async def _apply_auto_plots(
+    envelope: dict,
+    session,
+    run_id: str,
+    results: dict,
+    standard_detail: dict | None = None,
+) -> None:
+    """Generate auto-visualize plots and attach their hashes to the envelope.
+
+    Modifies *envelope* in place, adding an ``auto_plots`` key that maps each
+    configured plot_type to its image_hash string.  The full image data is NOT
+    included — callers use ``visualize(run_id, plot_type)`` to retrieve it.
+
+    Silently skips any plot_type that fails (e.g. drag_polar requested for an
+    aero run that has no alpha sweep data).
+    """
+    plot_types = getattr(session, "auto_visualize", [])
+    if not plot_types:
+        return
+
+    if standard_detail is None:
+        standard_detail = {}
+
+    # Enrich results with sectional_data (mirrors visualize() logic)
+    plot_results = dict(results)
+    if standard_detail.get("sectional_data"):
+        for surf_name, sect in standard_detail["sectional_data"].items():
+            if surf_name in plot_results.get("surfaces", {}):
+                plot_results["surfaces"][surf_name]["sectional_data"] = sect
+        plot_results["sectional_data"] = standard_detail.get("sectional_data", {})
+
+    mesh_snap = standard_detail.get("mesh_snapshot", {})
+    mesh_data: dict = {}
+    for surf_mesh in mesh_snap.values():
+        le = surf_mesh.get("leading_edge")
+        te = surf_mesh.get("trailing_edge")
+        if le and te:
+            mesh_data["mesh"] = np.array([le, te]).tolist()
+        break
+
+    auto_plots: dict[str, str | None] = {}
+    for plot_type in plot_types:
+        try:
+            img = await asyncio.to_thread(
+                generate_plot, plot_type, run_id, plot_results, {}, mesh_data, ""
+            )
+            auto_plots[plot_type] = getattr(img, "_hash", None)
+        except Exception:
+            pass  # don't let auto-plot errors block analysis results
+
+    if auto_plots:
+        envelope["auto_plots"] = auto_plots
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +499,9 @@ async def run_aero_analysis(
             mesh_shape = tuple(m.shape)
     telem = make_telemetry(elapsed, cache_hit, len(surfaces), mesh_shape)
 
-    return make_envelope("run_aero_analysis", run_id, inputs, results, validation, telem)
+    envelope = make_envelope("run_aero_analysis", run_id, inputs, results, validation, telem)
+    await _apply_auto_plots(envelope, session, run_id, results, standard_detail)
+    return envelope
 
 
 # ---------------------------------------------------------------------------
@@ -561,7 +624,9 @@ async def run_aerostruct_analysis(
             mesh_shape = tuple(m.shape)
     telem = make_telemetry(elapsed, cache_hit, len(surfaces), mesh_shape)
 
-    return make_envelope("run_aerostruct_analysis", run_id, inputs, results, validation, telem)
+    envelope = make_envelope("run_aerostruct_analysis", run_id, inputs, results, validation, telem)
+    await _apply_auto_plots(envelope, session, run_id, results, standard_detail)
+    return envelope
 
 
 # ---------------------------------------------------------------------------
@@ -660,7 +725,9 @@ async def compute_drag_polar(
     elapsed = time.perf_counter() - t0
     telem = make_telemetry(elapsed, False, len(surfaces))
 
-    return make_envelope("compute_drag_polar", run_id, inputs, polar_results, validation, telem)
+    envelope = make_envelope("compute_drag_polar", run_id, inputs, polar_results, validation, telem)
+    await _apply_auto_plots(envelope, session, run_id, polar_results)
+    return envelope
 
 
 # ---------------------------------------------------------------------------
@@ -901,36 +968,63 @@ async def run_optimization(
             max_iterations=max_iterations,
         )
 
+        from .core.builders import (
+            DV_NAME_MAP, OBJECTIVE_MAP_AERO, OBJECTIVE_MAP_AEROSTRUCT, resolve_path,
+        )
+        from .core.convergence import OptimizationTracker
+
+        primary_name = surface_dicts[0]["name"] if surface_dicts else "wing"
+
+        # Build DV path map for tracking
+        dv_path_map: dict[str, str] = {}
+        for dv in design_variables:
+            template = DV_NAME_MAP.get(dv["name"])
+            if template:
+                dv_path_map[dv["name"]] = resolve_path(template, primary_name, point_name)
+
+        # Record initial DV values and attach iteration tracker
+        tracker = OptimizationTracker()
+        initial_dvs = tracker.record_initial(prob, dv_path_map)
+        tracker.attach(prob)
+
+        # Objective path for per-iteration tracking
+        obj_map = OBJECTIVE_MAP_AERO if analysis_type == "aero" else OBJECTIVE_MAP_AEROSTRUCT
+        obj_template = obj_map.get(objective)
+        obj_path = resolve_path(obj_template, primary_name, point_name) if obj_template else ""
+
         prob.run_driver()
         success = prob.driver.result.success if hasattr(prob.driver, "result") else True
+
+        # Extract iteration history (shuts down recorder, cleans up temp file)
+        opt_history = tracker.extract(dv_path_map, obj_path)
 
         if analysis_type == "aero":
             final_results = extract_aero_results(prob, surface_dicts, point_name)
         else:
             final_results = extract_aerostruct_results(prob, surface_dicts, point_name)
 
-        # Extract optimised DV values
-        from .core.builders import DV_NAME_MAP, resolve_path
-        dv_results = {}
-        primary_name = surface_dicts[0]["name"] if surface_dicts else "wing"
-        for dv in design_variables:
-            template = DV_NAME_MAP.get(dv["name"])
-            if template:
-                path = resolve_path(template, primary_name, point_name)
-                try:
-                    val = prob.get_val(path)
-                    dv_results[dv["name"]] = np.asarray(val).tolist()
-                except Exception:
-                    pass
+        # Extract standard detail for visualization (persisted in artifact)
+        standard = extract_standard_detail(prob, surface_dicts, analysis_type, point_name)
 
-        return {
+        # Extract optimised DV values
+        dv_results: dict = {}
+        for dv_name, path in dv_path_map.items():
+            try:
+                val = prob.get_val(path)
+                dv_results[dv_name] = np.asarray(val).tolist()
+            except Exception:
+                pass
+
+        result = {
             "success": bool(success),
             "optimized_design_variables": dv_results,
             "final_results": final_results,
+            "optimization_history": {"initial_dvs": initial_dvs, **opt_history},
         }
+        return result, standard
 
     t0 = time.perf_counter()
-    result = await asyncio.to_thread(_suppress_output, _run)
+    result, standard_detail = await asyncio.to_thread(_suppress_output, _run)
     inputs = {
         "analysis_type": analysis_type, "objective": objective,
         "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
@@ -942,8 +1036,9 @@ async def run_optimization(
         tool_name="run_optimization",
         surfaces=surfaces,
         parameters=inputs,
-        results=result,
+        results={**result, "standard_detail": standard_detail},
     )
+    session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
 
     findings = validate_optimization(result, context={"analysis_type": analysis_type})
     validation = findings_to_dict(findings)
@@ -1077,11 +1172,24 @@ async def get_run(
     has_mesh = bool(session.get_mesh_snapshot(run_id))
 
     # Plot types available given what's stored
-    available_plots = ["drag_polar"] if analysis_type == "drag_polar" else ["lift_distribution"]
-    if analysis_type == "aerostruct":
-        available_plots.append("stress_distribution")
-    if has_mesh or has_standard:
-        available_plots.append("planform")
+    if analysis_type == "drag_polar":
+        available_plots = ["drag_polar"]
+    elif analysis_type == "optimization":
+        available_plots = ["lift_distribution", "opt_history"]
+        final_r = results.get("final_results", {})
+        if "fuelburn" in final_r or "structural_mass" in final_r:
+            available_plots.append("stress_distribution")
+        opt_hist = results.get("optimization_history", {})
+        if opt_hist.get("initial_dvs") or opt_hist.get("dv_history"):
+            available_plots.extend(["opt_dv_evolution", "opt_comparison"])
+        if has_mesh or has_standard:
+            available_plots.append("planform")
+    else:
+        available_plots = ["lift_distribution"]
+        if analysis_type == "aerostruct":
+            available_plots.append("stress_distribution")
+        if has_mesh or has_standard:
+            available_plots.append("planform")
     conv = session.get_convergence(run_id)
     if conv:
         available_plots.append("convergence")
@@ -1204,11 +1312,11 @@ async def visualize(
     plot_type: Annotated[
         str,
         "Plot type — one of: lift_distribution, drag_polar, stress_distribution, "
-        "convergence, planform",
+        "convergence, planform, opt_history, opt_dv_evolution, opt_comparison",
     ],
     session_id: Annotated[str | None, "Session hint for faster artifact lookup"] = None,
     case_name: Annotated[str, "Human-readable label for the plot title"] = "",
-) -> dict:
+) -> Image:
     """Generate a visualisation plot and return a base64-encoded PNG.
 
     Response includes:
@@ -1223,6 +1331,9 @@ async def visualize(
       stress_distribution — spanwise von Mises stress and failure index
       convergence         — solver residual history (if captured)
       planform            — wing planform top view with optional deflection overlay
+      opt_history         — optimizer objective convergence (optimization runs only)
+      opt_dv_evolution    — design variable evolution over iterations (optimization only)
+      opt_comparison      — before/after DV comparison: initial vs optimized values
     """
     if plot_type not in PLOT_TYPES:
         raise ValueError(
@@ -1235,6 +1346,16 @@ async def visualize(
         raise ValueError(f"Run '{run_id}' not found.")
 
     results = artifact.get("results", {})
+    artifact_type = artifact.get("metadata", {}).get("analysis_type", "")
+
+    # For optimization runs, the aerodynamic results live inside `final_results`.
+    # Merge them into plot_results so lift_distribution / stress_distribution work.
+    if artifact_type == "optimization":
+        final_r = results.get("final_results", {})
+        plot_results = dict(final_r)
+    else:
+        plot_results = dict(results)
+
     standard = results.get("standard_detail", {})
 
     # For planform, prefer session-stored mesh snapshot (faster), fall back to artifact
@@ -1254,7 +1375,6 @@ async def visualize(
     conv_data = session.get_convergence(run_id) or {}
 
     # Inject sectional_data into results for lift_distribution / stress plots
-    plot_results = dict(results)
     if standard.get("sectional_data"):
         # Merge sectional_data into per-surface dicts
         for surf_name, sect in standard["sectional_data"].items():
@@ -1262,9 +1382,19 @@ async def visualize(
                 plot_results["surfaces"][surf_name]["sectional_data"] = sect
         plot_results["sectional_data"] = standard.get("sectional_data", {})
 
+    # Build optimization_history for opt_* plot types
+    opt_history: dict | None = None
+    if artifact_type == "optimization" or plot_type.startswith("opt_"):
+        raw_hist = results.get("optimization_history", {})
+        opt_history = {
+            **raw_hist,
+            # Expose final DVs alongside initial for opt_comparison
+            "final_dvs": results.get("optimized_design_variables", {}),
+        }
+
     plot_response = await asyncio.to_thread(
         generate_plot,
-        plot_type, run_id, plot_results, conv_data, mesh_data, case_name,
+        plot_type, run_id, plot_results, conv_data, mesh_data, case_name, opt_history,
     )
     return plot_response
 
