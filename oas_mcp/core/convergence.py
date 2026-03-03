@@ -269,21 +269,50 @@ class OptimizationTracker:
             for case_id in case_ids:
                 case = cr.get_case(case_id)
 
-                # Objective value
-                if obj_path:
-                    try:
-                        obj_val = float(np.asarray(case[obj_path]).ravel()[0])
-                        objective_values.append(obj_val)
-                    except Exception:
-                        pass
+                # Use the proper CaseReader API so subsystem paths like
+                # "wing.twist_cp" are found regardless of promotion level.
+                try:
+                    case_dvs = case.get_design_vars(scaled=False) or {}
+                except Exception:
+                    case_dvs = {}
+                try:
+                    case_objs = case.get_objectives(scaled=False) or {}
+                except Exception:
+                    case_objs = {}
 
-                # DV values
+                # Objective value — prefer dedicated API, fall back to direct lookup
+                if obj_path:
+                    obj_val = case_objs.get(obj_path)
+                    if obj_val is None:
+                        # Fallback: iterate the single objective dict entry
+                        for v in case_objs.values():
+                            obj_val = v
+                            break
+                    if obj_val is None:
+                        try:
+                            obj_val = case[obj_path]
+                        except Exception:
+                            pass
+                    if obj_val is not None:
+                        try:
+                            objective_values.append(float(np.asarray(obj_val).ravel()[0]))
+                        except Exception:
+                            pass
+
+                # DV values — use get_design_vars() dict for reliable lookup
                 for dv_name, dv_path in dv_path_map.items():
-                    try:
-                        val = np.asarray(case[dv_path]).tolist()
-                        dv_history[dv_name].append(val)
-                    except Exception:
-                        pass
+                    raw = case_dvs.get(dv_path)
+                    if raw is None:
+                        # Fallback: direct index (works for top-level promoted vars)
+                        try:
+                            raw = case[dv_path]
+                        except Exception:
+                            pass
+                    if raw is not None:
+                        try:
+                            dv_history[dv_name].append(np.asarray(raw).tolist())
+                        except Exception:
+                            pass
 
             return {
                 "num_iterations": len(case_ids),

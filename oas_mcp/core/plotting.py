@@ -244,16 +244,40 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "") ->
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(_FIG_WIDTH_IN, _FIG_HEIGHT_IN))
     fig.suptitle(f"{title}\n(run_id: {run_id})", fontsize=9, y=0.98)
 
+    def _elem_y(y_nodes: list, n_elem: int) -> list | None:
+        """Map nodal y_span_norm to element midpoints.
+
+        OAS stores stress/failure per beam element (ny-1 values) while
+        y_span_norm comes from the ny mesh nodes.  Average adjacent nodes
+        to get the element-centre η coordinate.
+        """
+        if len(y_nodes) == n_elem:
+            return y_nodes
+        if len(y_nodes) == n_elem + 1:
+            return [(y_nodes[i] + y_nodes[i + 1]) / 2.0 for i in range(n_elem)]
+        return None
+
     plotted = False
     for surf_name, surf_res in results.get("surfaces", {}).items():
         sectional = surf_res.get("sectional_data", {})
-        y = sectional.get("y_span_norm")
+        y_nodes = sectional.get("y_span_norm")
         vm = sectional.get("vonmises_MPa")
         fi = sectional.get("failure_index")
 
-        if y and vm and len(y) == len(vm):
-            ax1.plot(y, vm, label=surf_name, linewidth=1.5)
-            plotted = True
+        if y_nodes and vm:
+            y_vm = _elem_y(y_nodes, len(vm))
+            if y_vm is not None:
+                ax1.plot(y_vm, vm, label=surf_name, linewidth=1.5)
+                plotted = True
+            else:
+                max_vm = surf_res.get("max_vonmises_Pa")
+                if max_vm is not None:
+                    ax1.axhline(
+                        max_vm / 1e6, linestyle="--",
+                        label=f"{surf_name} max={max_vm/1e6:.1f} MPa",
+                        linewidth=1.5,
+                    )
+                    plotted = True
         else:
             max_vm = surf_res.get("max_vonmises_Pa")
             if max_vm is not None:
@@ -264,8 +288,18 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "") ->
                 )
                 plotted = True
 
-        if y and fi and len(y) == len(fi):
-            ax2.plot(y, fi, label=surf_name, linewidth=1.5)
+        if y_nodes and fi:
+            y_fi = _elem_y(y_nodes, len(fi))
+            if y_fi is not None:
+                ax2.plot(y_fi, fi, label=surf_name, linewidth=1.5)
+            else:
+                failure = surf_res.get("failure")
+                if failure is not None:
+                    ax2.axhline(
+                        failure, linestyle="--",
+                        label=f"{surf_name} failure={failure:.3f}",
+                        linewidth=1.5,
+                    )
         else:
             failure = surf_res.get("failure")
             if failure is not None:
@@ -398,9 +432,12 @@ def plot_planform(run_id: str, mesh_data: dict, case_name: str = "") -> dict:
         ax.plot(def_te[:, 1], def_te[:, 0], "r--", linewidth=1.0, alpha=0.7)
 
     ax.set_xlabel("Spanwise y  [m]")
-    ax.set_ylabel("Chordwise x  [m]")
+    ax.set_ylabel("Chordwise x  [m]  (LE at top)")
     ax.set_title(f"Mesh: {nx}×{ny} nodes", fontsize=8)
-    ax.set_aspect("equal")
+    # Invert y-axis: aeronautical convention has LE (smaller x) at the top.
+    # Do NOT force equal aspect — high-AR wings collapse chord variation to
+    # a pixel-width line when span >> chord.
+    ax.invert_yaxis()
     ax.legend(fontsize=7, loc="upper left")
     ax.grid(True, alpha=0.3)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
