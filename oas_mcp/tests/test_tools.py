@@ -24,6 +24,18 @@ from oas_mcp.server import (
 pytestmark = pytest.mark.slow
 
 
+def _r(envelope: dict) -> dict:
+    """Extract the results payload from a versioned response envelope.
+
+    All analysis tools now return an envelope with schema_version, run_id,
+    validation, telemetry, and results.  Tests use this helper to unwrap it
+    so existing assertions still read naturally.
+    """
+    assert "schema_version" in envelope, f"Not an envelope: {list(envelope)}"
+    assert "results" in envelope, f"Envelope missing 'results': {list(envelope)}"
+    return envelope["results"]
+
+
 # ---------------------------------------------------------------------------
 # create_surface
 # ---------------------------------------------------------------------------
@@ -133,7 +145,13 @@ class TestCreateSurface:
 
 class TestRunAeroAnalysis:
     async def test_basic_results_structure(self, aero_wing):
-        r = await run_aero_analysis(["wing"])
+        env = await run_aero_analysis(["wing"])
+        assert env["schema_version"] == "1.0"
+        assert env["tool_name"] == "run_aero_analysis"
+        assert "run_id" in env
+        assert "validation" in env
+        assert "telemetry" in env
+        r = _r(env)
         assert "CL" in r
         assert "CD" in r
         assert "CM" in r
@@ -141,31 +159,38 @@ class TestRunAeroAnalysis:
         assert "surfaces" in r
         assert "wing" in r["surfaces"]
 
+    async def test_envelope_validation_block(self, aero_wing):
+        env = await run_aero_analysis(["wing"], alpha=5.0)
+        v = env["validation"]
+        assert "passed" in v
+        assert "findings" in v
+        assert isinstance(v["passed"], bool)
+
     async def test_cl_positive_at_positive_alpha(self, aero_wing):
-        r = await run_aero_analysis(["wing"], alpha=5.0)
+        r = _r(await run_aero_analysis(["wing"], alpha=5.0))
         assert r["CL"] > 0
 
     async def test_cl_negative_at_negative_alpha(self, aero_wing):
-        r = await run_aero_analysis(["wing"], alpha=-5.0)
+        r = _r(await run_aero_analysis(["wing"], alpha=-5.0))
         assert r["CL"] < 0
 
     async def test_cd_always_positive(self, aero_wing):
         for alpha in [-5.0, 0.0, 5.0]:
-            r = await run_aero_analysis(["wing"], alpha=alpha)
+            r = _r(await run_aero_analysis(["wing"], alpha=alpha))
             assert r["CD"] > 0, f"CD should be positive at alpha={alpha}"
 
     async def test_cl_zero_at_zero_alpha_rect(self, aero_wing):
-        r = await run_aero_analysis(["wing"], alpha=0.0)
+        r = _r(await run_aero_analysis(["wing"], alpha=0.0))
         assert abs(r["CL"]) < 0.01  # rect wing, no camber → CL≈0 at α=0
 
     async def test_cl_increases_with_alpha(self, aero_wing):
-        r1 = await run_aero_analysis(["wing"], alpha=0.0)
-        r2 = await run_aero_analysis(["wing"], alpha=5.0)
-        r3 = await run_aero_analysis(["wing"], alpha=10.0)
+        r1 = _r(await run_aero_analysis(["wing"], alpha=0.0))
+        r2 = _r(await run_aero_analysis(["wing"], alpha=5.0))
+        r3 = _r(await run_aero_analysis(["wing"], alpha=10.0))
         assert r1["CL"] < r2["CL"] < r3["CL"]
 
     async def test_ld_is_cl_over_cd(self, aero_wing):
-        r = await run_aero_analysis(["wing"], alpha=5.0)
+        r = _r(await run_aero_analysis(["wing"], alpha=5.0))
         assert r["L_over_D"] == pytest.approx(r["CL"] / r["CD"], rel=1e-4)
 
     async def test_missing_surface_raises(self):
@@ -195,7 +220,7 @@ class TestRunAeroAnalysis:
 
 class TestRunAerostructAnalysis:
     async def test_basic_results_structure(self, struct_wing):
-        r = await run_aerostruct_analysis(["wing"])
+        r = _r(await run_aerostruct_analysis(["wing"]))
         assert "CL" in r
         assert "CD" in r
         assert "fuelburn" in r
@@ -203,15 +228,15 @@ class TestRunAerostructAnalysis:
         assert "L_equals_W" in r
 
     async def test_structural_mass_positive(self, struct_wing):
-        r = await run_aerostruct_analysis(["wing"])
+        r = _r(await run_aerostruct_analysis(["wing"]))
         assert r["structural_mass"] > 0
 
     async def test_fuelburn_positive(self, struct_wing):
-        r = await run_aerostruct_analysis(["wing"])
+        r = _r(await run_aerostruct_analysis(["wing"]))
         assert r["fuelburn"] > 0
 
     async def test_failure_in_surface_results(self, struct_wing):
-        r = await run_aerostruct_analysis(["wing"])
+        r = _r(await run_aerostruct_analysis(["wing"]))
         assert "failure" in r["surfaces"]["wing"]
 
     async def test_no_struct_props_raises(self, aero_wing):
@@ -219,13 +244,13 @@ class TestRunAerostructAnalysis:
             await run_aerostruct_analysis(["wing"])
 
     async def test_cl_positive_at_positive_alpha(self, struct_wing):
-        r = await run_aerostruct_analysis(["wing"], alpha=5.0)
+        r = _r(await run_aerostruct_analysis(["wing"], alpha=5.0))
         assert r["CL"] > 0
 
     # --- wingbox model ---
 
     async def test_wingbox_basic_results_structure(self, wingbox_wing):
-        r = await run_aerostruct_analysis(["wing"])
+        r = _r(await run_aerostruct_analysis(["wing"]))
         assert "CL" in r
         assert "CD" in r
         assert "fuelburn" in r
@@ -233,15 +258,15 @@ class TestRunAerostructAnalysis:
         assert "L_equals_W" in r
 
     async def test_wingbox_structural_mass_positive(self, wingbox_wing):
-        r = await run_aerostruct_analysis(["wing"])
+        r = _r(await run_aerostruct_analysis(["wing"]))
         assert r["structural_mass"] > 0
 
     async def test_wingbox_failure_in_surface_results(self, wingbox_wing):
-        r = await run_aerostruct_analysis(["wing"])
+        r = _r(await run_aerostruct_analysis(["wing"]))
         assert "failure" in r["surfaces"]["wing"]
 
     async def test_wingbox_cl_positive_at_positive_alpha(self, wingbox_wing):
-        r = await run_aerostruct_analysis(["wing"], alpha=5.0)
+        r = _r(await run_aerostruct_analysis(["wing"], alpha=5.0))
         assert r["CL"] > 0
 
 
@@ -252,7 +277,7 @@ class TestRunAerostructAnalysis:
 
 class TestComputeDragPolar:
     async def test_result_arrays_same_length(self, aero_wing):
-        dp = await compute_drag_polar(["wing"], alpha_start=-5.0, alpha_end=10.0, num_alpha=4)
+        dp = _r(await compute_drag_polar(["wing"], alpha_start=-5.0, alpha_end=10.0, num_alpha=4))
         n = len(dp["alpha_deg"])
         assert len(dp["CL"]) == n
         assert len(dp["CD"]) == n
@@ -260,19 +285,19 @@ class TestComputeDragPolar:
         assert len(dp["L_over_D"]) == n
 
     async def test_cl_monotonically_increasing(self, aero_wing):
-        dp = await compute_drag_polar(["wing"], alpha_start=-5.0, alpha_end=10.0, num_alpha=4)
+        dp = _r(await compute_drag_polar(["wing"], alpha_start=-5.0, alpha_end=10.0, num_alpha=4))
         cls = dp["CL"]
         assert all(cls[i] < cls[i + 1] for i in range(len(cls) - 1))
 
     async def test_cd_parabolic_minimum_at_mid_alpha(self, aero_wing):
-        dp = await compute_drag_polar(["wing"], alpha_start=-5.0, alpha_end=10.0, num_alpha=5)
+        dp = _r(await compute_drag_polar(["wing"], alpha_start=-5.0, alpha_end=10.0, num_alpha=5))
         cds = dp["CD"]
         # CD should decrease then increase (parabolic) — min not at endpoints
         min_idx = cds.index(min(cds))
         assert 0 < min_idx < len(cds) - 1
 
     async def test_best_ld_keys(self, aero_wing):
-        dp = await compute_drag_polar(["wing"], alpha_start=0.0, alpha_end=10.0, num_alpha=3)
+        dp = _r(await compute_drag_polar(["wing"], alpha_start=0.0, alpha_end=10.0, num_alpha=3))
         best = dp["best_L_over_D"]
         assert "alpha_deg" in best
         assert "CL" in best
@@ -281,7 +306,7 @@ class TestComputeDragPolar:
         assert isinstance(best["alpha_deg"], float)  # no np.float64 leakage
 
     async def test_num_alpha_respected(self, aero_wing):
-        dp = await compute_drag_polar(["wing"], num_alpha=6)
+        dp = _r(await compute_drag_polar(["wing"], num_alpha=6))
         assert len(dp["alpha_deg"]) == 6
 
 
@@ -292,18 +317,18 @@ class TestComputeDragPolar:
 
 class TestComputeStabilityDerivatives:
     async def test_result_keys(self, aero_wing):
-        sd = await compute_stability_derivatives(["wing"])
+        sd = _r(await compute_stability_derivatives(["wing"]))
         assert "CL_alpha" in sd
         assert "CM_alpha" in sd
         assert "static_margin" in sd
         assert "stability" in sd
 
     async def test_cl_alpha_positive(self, aero_wing):
-        sd = await compute_stability_derivatives(["wing"])
+        sd = _r(await compute_stability_derivatives(["wing"]))
         assert sd["CL_alpha"] > 0, "CL_alpha should be positive for a lifting surface"
 
     async def test_stability_string_reflects_sign(self, aero_wing):
-        sd = await compute_stability_derivatives(["wing"], cg=[0.5, 0.0, 0.0])
+        sd = _r(await compute_stability_derivatives(["wing"], cg=[0.5, 0.0, 0.0]))
         sm = sd["static_margin"]
         if sm > 0.05:
             assert "stable" in sd["stability"]
@@ -320,24 +345,24 @@ class TestComputeStabilityDerivatives:
 
 class TestRunOptimization:
     async def test_cl_constraint_satisfied(self, aero_wing):
-        result = await run_optimization(
+        result = _r(await run_optimization(
             surfaces=["wing"],
             analysis_type="aero",
             objective="CD",
             design_variables=[{"name": "alpha", "lower": -10.0, "upper": 15.0}],
             constraints=[{"name": "CL", "equals": 0.5}],
-        )
+        ))
         assert result["success"] is True
         assert result["final_results"]["CL"] == pytest.approx(0.5, abs=1e-3)
 
     async def test_result_structure(self, aero_wing):
-        result = await run_optimization(
+        result = _r(await run_optimization(
             surfaces=["wing"],
             analysis_type="aero",
             objective="CD",
             design_variables=[{"name": "alpha", "lower": -5.0, "upper": 15.0}],
             constraints=[{"name": "CL", "equals": 0.3}],
-        )
+        ))
         assert "success" in result
         assert "optimized_design_variables" in result
         assert "final_results" in result

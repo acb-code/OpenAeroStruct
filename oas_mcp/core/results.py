@@ -1,4 +1,12 @@
-"""Extract results from solved OpenMDAO problems."""
+"""Extract results from solved OpenMDAO problems.
+
+Standard-level extraction
+-------------------------
+Call ``extract_standard_detail(prob, surfaces, analysis_type, point_name)``
+to capture sectional data (spanwise Cl, von Mises distributions) and mesh
+snapshots that survive cache eviction.  This is stored in the artifact at
+run time and does not require the live om.Problem later.
+"""
 
 from __future__ import annotations
 
@@ -126,6 +134,85 @@ def extract_aerostruct_results(
         results["structural_mass"] = total_struct_mass
 
     return results
+
+
+def extract_standard_detail(
+    prob: om.Problem,
+    surfaces: list[dict],
+    analysis_type: str,
+    point_name: str,
+) -> dict:
+    """Extract 'standard' detail level data at run time.
+
+    This data is persisted in the artifact store and survives cache eviction,
+    unlike 'full' detail which requires the live om.Problem.
+
+    Returns a dict with:
+      - ``sectional_data``: per-surface spanwise distributions
+      - ``mesh_snapshot``: leading/trailing edge coordinates of undeformed mesh
+    """
+    standard: dict = {"sectional_data": {}, "mesh_snapshot": {}}
+
+    for surface in surfaces:
+        name = surface["name"]
+        perf = f"{point_name}.{name}_perf"
+        sect: dict = {}
+
+        # Spanwise panel y-stations from mesh (normalised 0→1)
+        mesh = surface.get("mesh")
+        if mesh is not None:
+            y_coords = np.asarray(mesh[0, :, 1]).ravel()
+            y_min, y_max = float(y_coords.min()), float(y_coords.max())
+            span_half = max(abs(y_max - y_min), 1e-12)
+            y_norm = ((y_coords - y_min) / span_half).tolist()
+            sect["y_span_norm"] = y_norm
+
+            # Mesh snapshot: leading/trailing edge for planform plot
+            le = np.asarray(mesh[0, :, :]).tolist()
+            te = np.asarray(mesh[-1, :, :]).tolist()
+            standard["mesh_snapshot"][name] = {
+                "leading_edge": le,
+                "trailing_edge": te,
+                "nx": int(mesh.shape[0]),
+                "ny": int(mesh.shape[1]),
+            }
+
+        # Sectional CL (panel-level) — path varies by OAS version
+        for cl_path in [
+            f"{point_name}.{name}_perf.Cl",
+            f"{point_name}.aero_states.{name}_sec_forces",
+        ]:
+            cl_val = _try_get(prob, cl_path)
+            if cl_val is not None:
+                cl_arr = np.asarray(cl_val).ravel()
+                if len(cl_arr) > 1:
+                    sect["Cl"] = cl_arr.tolist()
+                break
+
+        # Spanwise von Mises stress (aerostruct only)
+        if analysis_type == "aerostruct":
+            vm_path = f"{perf}.vonmises"
+            vm_val = _try_get(prob, vm_path)
+            if vm_val is not None:
+                vm_arr = np.asarray(vm_val).ravel()
+                # Convert Pa → MPa; take max of upper/lower
+                if len(vm_arr) > 1:
+                    # OAS stores [n_elements × 2] (upper/lower) flattened
+                    n = len(vm_arr) // 2 if len(vm_arr) % 2 == 0 else len(vm_arr)
+                    vm_mpa = (vm_arr[:n] / 1e6).tolist()
+                    sect["vonmises_MPa"] = vm_mpa
+
+            # Failure index distribution (per element)
+            fi_path = f"{perf}.failure"
+            fi_val = _try_get(prob, fi_path)
+            if fi_val is not None:
+                fi_arr = np.asarray(fi_val).ravel()
+                if len(fi_arr) > 1:
+                    sect["failure_index"] = fi_arr.tolist()
+
+        standard["sectional_data"][name] = sect
+
+    return standard
 
 
 def extract_stability_results(prob: om.Problem) -> dict:

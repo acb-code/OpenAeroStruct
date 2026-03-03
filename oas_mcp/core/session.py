@@ -4,6 +4,16 @@ Session management for OAS MCP server.
 A Session stores surface definitions and optionally caches a built/set-up
 om.Problem so that parameter sweeps (varying alpha, Mach, etc.) can reuse
 the expensive setup() call.
+
+New in observability update
+----------------------------
+- Cache pinning: ``pin_run`` / ``unpin_run`` prevent eviction during
+  multi-step agent workflows.
+- Session-scoped defaults: ``configure`` sets per-session preferences
+  (detail_level, validation_severity_threshold, auto_visualize,
+  telemetry_mode) so agents don't repeat them on every call.
+- ``requirements``: stored list of user-defined requirements checked
+  against each analysis result.
 """
 
 from __future__ import annotations
@@ -42,23 +52,64 @@ class _CachedProblem:
     prob: om.Problem
     analysis_type: str  # "aero" or "aerostruct"
     surface_fingerprints: dict[str, str]  # name → fingerprint at build time
+    pinned_by: set[str] = field(default_factory=set)  # set of run_ids that pinned this
+
+
+@dataclass
+class SessionDefaults:
+    """Per-session preferences that persist across tool calls."""
+
+    # "summary" (default) | "standard"
+    default_detail_level: str = "summary"
+    # Minimum severity to include in validation block: "error" | "warning" | "info"
+    validation_severity_threshold: str = "info"
+    # Plot types to auto-generate with each analysis (empty = no auto-plots)
+    auto_visualize: list[str] = field(default_factory=list)
+    # "off" | "logging" | "otel" — overrides OAS_TELEMETRY_MODE env var for this session
+    telemetry_mode: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "default_detail_level": self.default_detail_level,
+            "validation_severity_threshold": self.validation_severity_threshold,
+            "auto_visualize": self.auto_visualize,
+            "telemetry_mode": self.telemetry_mode,
+        }
 
 
 @dataclass
 class Session:
-    """Stores surfaces and cached OpenMDAO problems for a session."""
+    """Stores surfaces, cached OpenMDAO problems, defaults, and requirements."""
 
     # name → surface dict (includes mesh as numpy array)
     surfaces: dict[str, dict] = field(default_factory=dict)
 
-    # Cached problems: key = frozenset of surface names + analysis_type
+    # Cached problems: key = analysis_type + ":" + sorted surface names
     _cache: dict[str, _CachedProblem] = field(default_factory=dict, repr=False)
+
+    # Pinned run_ids → cache_keys: prevent cache eviction
+    _pinned: dict[str, str] = field(default_factory=dict, repr=False)
+
+    # Per-session defaults
+    defaults: SessionDefaults = field(default_factory=SessionDefaults)
+
+    # User-defined requirements (dot-path assertions checked after each analysis)
+    requirements: list[dict] = field(default_factory=list)
+
+    # run_id → convergence data (stored at run time)
+    _convergence: dict[str, dict] = field(default_factory=dict, repr=False)
+
+    # run_id → mesh snapshot (for planform plots)
+    _mesh_snapshots: dict[str, dict] = field(default_factory=dict, repr=False)
 
     def add_surface(self, surface: dict) -> None:
         name = surface["name"]
         self.surfaces[name] = surface
-        # Invalidate any cached problems that include this surface
-        stale = [k for k, v in self._cache.items() if name in v.surface_fingerprints]
+        # Invalidate any unpinned cached problems that include this surface
+        stale = [
+            k for k, v in self._cache.items()
+            if name in v.surface_fingerprints and not v.pinned_by
+        ]
         for k in stale:
             del self._cache[k]
 
@@ -77,9 +128,13 @@ class Session:
             return None
         # Validate fingerprints
         for name in names:
+            if name not in self.surfaces:
+                del self._cache[key]
+                return None
             current = _surface_fingerprint(self.surfaces[name])
             if cached.surface_fingerprints.get(name) != current:
-                del self._cache[key]
+                if not cached.pinned_by:
+                    del self._cache[key]
                 return None
         return cached.prob
 
@@ -94,9 +149,107 @@ class Session:
             surface_fingerprints=fingerprints,
         )
 
+    def cache_status(self, names: list[str], analysis_type: str) -> dict:
+        """Return cache status for a set of surfaces and analysis type."""
+        key = self._cache_key(names, analysis_type)
+        cached = self._cache.get(key)
+        if cached is None:
+            return {"cached": False, "pinned": False, "pin_count": 0}
+        return {
+            "cached": True,
+            "pinned": bool(cached.pinned_by),
+            "pin_count": len(cached.pinned_by),
+        }
+
+    # ------------------------------------------------------------------
+    # Cache pinning
+    # ------------------------------------------------------------------
+
+    def pin_run(self, run_id: str, names: list[str], analysis_type: str) -> bool:
+        """Pin the cached problem for *run_id* to prevent eviction.
+
+        Returns True if there was a cached problem to pin, False otherwise.
+        """
+        key = self._cache_key(names, analysis_type)
+        cached = self._cache.get(key)
+        if cached is None:
+            return False
+        cached.pinned_by.add(run_id)
+        self._pinned[run_id] = key
+        return True
+
+    def unpin_run(self, run_id: str) -> bool:
+        """Remove the pin for *run_id*.
+
+        Returns True if the pin existed.
+        """
+        key = self._pinned.pop(run_id, None)
+        if key is None:
+            return False
+        cached = self._cache.get(key)
+        if cached is not None:
+            cached.pinned_by.discard(run_id)
+        return True
+
+    def is_pinned(self, run_id: str) -> bool:
+        return run_id in self._pinned
+
+    # ------------------------------------------------------------------
+    # Convergence & mesh snapshots
+    # ------------------------------------------------------------------
+
+    def store_convergence(self, run_id: str, data: dict) -> None:
+        self._convergence[run_id] = data
+
+    def get_convergence(self, run_id: str) -> dict | None:
+        return self._convergence.get(run_id)
+
+    def store_mesh_snapshot(self, run_id: str, data: dict) -> None:
+        self._mesh_snapshots[run_id] = data
+
+    def get_mesh_snapshot(self, run_id: str) -> dict | None:
+        return self._mesh_snapshots.get(run_id)
+
+    # ------------------------------------------------------------------
+    # Configure defaults
+    # ------------------------------------------------------------------
+
+    def configure(self, **kwargs) -> None:
+        """Update session defaults from keyword arguments."""
+        valid_fields = {
+            "default_detail_level", "validation_severity_threshold",
+            "auto_visualize", "telemetry_mode",
+        }
+        for key, value in kwargs.items():
+            if key not in valid_fields:
+                raise ValueError(
+                    f"Unknown session default {key!r}. "
+                    f"Valid keys: {sorted(valid_fields)}"
+                )
+            setattr(self.defaults, key, value)
+
+    # ------------------------------------------------------------------
+    # Requirements
+    # ------------------------------------------------------------------
+
+    def set_requirements(self, requirements: list[dict]) -> None:
+        self.requirements = list(requirements)
+
+    def clear_requirements(self) -> None:
+        self.requirements = []
+
+    # ------------------------------------------------------------------
+    # Clear
+    # ------------------------------------------------------------------
+
     def clear(self) -> None:
         self.surfaces.clear()
         self._cache.clear()
+        self._pinned.clear()
+        self._convergence.clear()
+        self._mesh_snapshots.clear()
+        self.defaults = SessionDefaults()
+        self.requirements = []
 
 
 class SessionManager:

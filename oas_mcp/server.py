@@ -21,6 +21,7 @@ import contextlib
 import io
 import json
 import os
+import time
 import warnings
 from typing import Annotated, Any
 
@@ -40,11 +41,25 @@ from .core.defaults import (
     DEFAULT_WINGBOX_LOWER_X,
     DEFAULT_WINGBOX_LOWER_Y,
 )
+from .core.envelope import make_envelope, make_error_envelope
+from .core.errors import OASMCPError, UserInputError, SolverConvergenceError
 from .core.mesh import apply_dihedral, apply_sweep, apply_taper, build_mesh
+from .core.plotting import PLOT_TYPES, generate_plot
+from .core.requirements import check_requirements
 from .core.results import (
     extract_aero_results,
     extract_aerostruct_results,
     extract_stability_results,
+    extract_standard_detail,
+)
+from .core.telemetry import get_run_logs, make_telemetry
+from .core.validation import (
+    findings_to_dict,
+    validate_aero,
+    validate_aerostruct,
+    validate_drag_polar,
+    validate_optimization,
+    validate_stability,
 )
 from .core.artifacts import ArtifactStore
 from .core.auth import build_auth_settings, build_token_verifier
@@ -82,12 +97,36 @@ CRITICAL CONSTRAINTS:
   • Surface names are arbitrary strings but must match exactly between create_surface
     and analysis calls.
 
+RESPONSE ENVELOPE (all analysis tools):
+  Every analysis tool returns a versioned envelope (schema_version="1.0"):
+    • results:     tool-specific payload (CL, CD, etc.)
+    • validation:  physics and numerics checks — check "passed" before trusting results
+    • telemetry:   timing and cache hit info
+    • run_id:      use for get_run(), pin_run(), get_detailed_results(), visualize()
+    • error:       present when the tool failed; check error.code for action to take
+  Error codes: USER_INPUT_ERROR, SOLVER_CONVERGENCE_ERROR, CACHE_EVICTED_ERROR, INTERNAL_ERROR
+
+VALIDATION:
+  • Each response includes a "validation" block with physics/numerics checks.
+  • Check validation.passed — if False, review validation.findings for error/warning details.
+  • Each finding has: check_id, severity (error/warning/info), message, remediation hint.
+
+OBSERVABILITY TOOLS:
+  • get_run(run_id)                    — full manifest: inputs, outputs, validation, cache state
+  • pin_run(run_id, surfaces, type)    — prevent cache eviction during multi-step workflows
+  • unpin_run(run_id)                  — release pin when done
+  • get_detailed_results(run_id, lvl)  — "standard" = sectional data; "full" = raw arrays
+  • visualize(run_id, plot_type)       — base64 PNG: lift_distribution, drag_polar,
+                                         stress_distribution, convergence, planform
+  • get_last_logs(run_id)              — server-side log records for debugging
+  • configure_session(session_id, ...) — set per-session defaults (detail level, auto-plots, etc.)
+
 PARAMETER TIPS:
   • Cruise conditions: velocity=248 m/s, Mach_number=0.84, density=0.38 kg/m³, re=1e6
   • Good starting mesh: num_x=2, num_y=7 (fast); use num_y=15 for higher fidelity
   • wing_type="CRM" produces a realistic transport wing with built-in twist;
     wing_type="rect" produces a flat untwisted planform — simpler but less realistic
-  • failure < 0 means no structural failure; failure > 0 means the structure has failed
+  • failure > 1.0 means structural failure (utilisation ratio > 1); failure < 1.0 = OK
   • L_equals_W residual near 0 means the wing is sized to carry the aircraft weight
 
 PERFORMANCE:
@@ -95,6 +134,7 @@ PERFORMANCE:
     Subsequent calls with the same surfaces reuse the cached problem — only the flight
     conditions change, so parameter sweeps are very fast.
   • Calling create_surface again with the same name invalidates the cache.
+  • Use pin_run() to guarantee cache availability during multi-step workflows.
 
 ARTIFACT STORAGE (every analysis is automatically saved):
   • Each analysis tool returns a run_id — use it to retrieve results later.
@@ -351,21 +391,54 @@ async def run_aero_analysis(
             session.store_problem(surfaces, "aero", prob)
 
         prob.run_model()
-        return extract_aero_results(prob, surface_dicts, "aero")
+        aero_results = extract_aero_results(prob, surface_dicts, "aero")
+        standard = extract_standard_detail(prob, surface_dicts, "aero", "aero")
+        return aero_results, standard
 
-    results = await asyncio.to_thread(_suppress_output, _run)
+    t0 = time.perf_counter()
+    cache_hit = session.get_cached_problem(surfaces, "aero") is not None
+    results, standard_detail = await asyncio.to_thread(_suppress_output, _run)
+
+    inputs = {
+        "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
+        "reynolds_number": reynolds_number, "density": density,
+    }
     run_id = _artifacts.save(
         session_id=session_id,
         analysis_type="aero",
         tool_name="run_aero_analysis",
         surfaces=surfaces,
-        parameters={
-            "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
-            "reynolds_number": reynolds_number, "density": density,
-        },
-        results=results,
+        parameters=inputs,
+        results={**results, "standard_detail": standard_detail},
     )
-    return {**results, "run_id": run_id}
+    # Store standard detail and mesh snapshot in session for later retrieval
+    session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
+
+    findings = validate_aero(results, context={"alpha": alpha})
+    if session.requirements:
+        req_report = check_requirements(session.requirements, results)
+        for outcome in req_report.get("results", []):
+            if not outcome.get("passed"):
+                from .core.validation import ValidationFinding
+                findings.append(ValidationFinding(
+                    check_id=f"requirements.{outcome['label']}",
+                    category="constraints",
+                    severity="error",
+                    confidence="high",
+                    passed=False,
+                    message=f"Requirement '{outcome['label']}': {outcome['path']} {outcome['operator']} {outcome['target']} (actual: {outcome.get('actual')})",
+                    remediation="Adjust design or requirements.",
+                ))
+    validation = findings_to_dict(findings)
+    elapsed = time.perf_counter() - t0
+    mesh_shape = None
+    if surface_dicts:
+        m = surface_dicts[0].get("mesh")
+        if m is not None:
+            mesh_shape = tuple(m.shape)
+    telem = make_telemetry(elapsed, cache_hit, len(surfaces), mesh_shape)
+
+    return make_envelope("run_aero_analysis", run_id, inputs, results, validation, telem)
 
 
 # ---------------------------------------------------------------------------
@@ -441,22 +514,54 @@ async def run_aerostruct_analysis(
             session.store_problem(surfaces, "aerostruct", prob)
 
         prob.run_model()
-        return extract_aerostruct_results(prob, surface_dicts, "AS_point_0")
+        as_results = extract_aerostruct_results(prob, surface_dicts, "AS_point_0")
+        standard = extract_standard_detail(prob, surface_dicts, "aerostruct", "AS_point_0")
+        return as_results, standard
 
-    results = await asyncio.to_thread(_suppress_output, _run)
+    t0 = time.perf_counter()
+    cache_hit = session.get_cached_problem(surfaces, "aerostruct") is not None
+    results, standard_detail = await asyncio.to_thread(_suppress_output, _run)
+
+    inputs = {
+        "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
+        "reynolds_number": reynolds_number, "density": density,
+        "W0": W0, "R": R, "speed_of_sound": speed_of_sound, "load_factor": load_factor,
+    }
     run_id = _artifacts.save(
         session_id=session_id,
         analysis_type="aerostruct",
         tool_name="run_aerostruct_analysis",
         surfaces=surfaces,
-        parameters={
-            "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
-            "reynolds_number": reynolds_number, "density": density,
-            "W0": W0, "R": R, "speed_of_sound": speed_of_sound, "load_factor": load_factor,
-        },
-        results=results,
+        parameters=inputs,
+        results={**results, "standard_detail": standard_detail},
     )
-    return {**results, "run_id": run_id}
+    session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
+
+    findings = validate_aerostruct(results, context={"alpha": alpha, "W0": W0})
+    if session.requirements:
+        req_report = check_requirements(session.requirements, results)
+        for outcome in req_report.get("results", []):
+            if not outcome.get("passed"):
+                from .core.validation import ValidationFinding
+                findings.append(ValidationFinding(
+                    check_id=f"requirements.{outcome['label']}",
+                    category="constraints",
+                    severity="error",
+                    confidence="high",
+                    passed=False,
+                    message=f"Requirement '{outcome['label']}': {outcome['path']} {outcome['operator']} {outcome['target']} (actual: {outcome.get('actual')})",
+                    remediation="Adjust design or requirements.",
+                ))
+    validation = findings_to_dict(findings)
+    elapsed = time.perf_counter() - t0
+    mesh_shape = None
+    if surface_dicts:
+        m = surface_dicts[0].get("mesh")
+        if m is not None:
+            mesh_shape = tuple(m.shape)
+    telem = make_telemetry(elapsed, cache_hit, len(surfaces), mesh_shape)
+
+    return make_envelope("run_aerostruct_analysis", run_id, inputs, results, validation, telem)
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +621,7 @@ async def compute_drag_polar(
 
         return CLs, CDs, CMs
 
+    t0 = time.perf_counter()
     CLs, CDs, CMs = await asyncio.to_thread(_suppress_output, _run)
 
     LoDs = [cl / cd if cd > 0 else None for cl, cd in zip(CLs, CDs)]
@@ -535,19 +641,26 @@ async def compute_drag_polar(
             "L_over_D": round(best_LoD, 4) if best_LoD else None,
         },
     }
+    inputs = {
+        "alpha_start": alpha_start, "alpha_end": alpha_end, "num_alpha": num_alpha,
+        "velocity": velocity, "Mach_number": Mach_number,
+        "reynolds_number": reynolds_number, "density": density,
+    }
     run_id = _artifacts.save(
         session_id=session_id,
         analysis_type="drag_polar",
         tool_name="compute_drag_polar",
         surfaces=surfaces,
-        parameters={
-            "alpha_start": alpha_start, "alpha_end": alpha_end, "num_alpha": num_alpha,
-            "velocity": velocity, "Mach_number": Mach_number,
-            "reynolds_number": reynolds_number, "density": density,
-        },
+        parameters=inputs,
         results=polar_results,
     )
-    return {**polar_results, "run_id": run_id}
+
+    findings = validate_drag_polar(polar_results, context={"alpha_start": alpha_start})
+    validation = findings_to_dict(findings)
+    elapsed = time.perf_counter() - t0
+    telem = make_telemetry(elapsed, False, len(surfaces))
+
+    return make_envelope("compute_drag_polar", run_id, inputs, polar_results, validation, telem)
 
 
 # ---------------------------------------------------------------------------
@@ -669,19 +782,27 @@ async def compute_stability_derivatives(
         prob.run_model()
         return extract_stability_results(prob)
 
+    t0 = time.perf_counter()
     results = await asyncio.to_thread(_suppress_output, _run)
+    inputs = {
+        "alpha": alpha, "velocity": velocity, "Mach_number": Mach_number,
+        "reynolds_number": reynolds_number, "density": density,
+    }
     run_id = _artifacts.save(
         session_id=session_id,
         analysis_type="stability",
         tool_name="compute_stability_derivatives",
         surfaces=surfaces,
-        parameters={
-            "alpha": alpha, "velocity": velocity, "Mach_number": Mach_number,
-            "reynolds_number": reynolds_number, "density": density,
-        },
+        parameters=inputs,
         results=results,
     )
-    return {**results, "run_id": run_id}
+
+    findings = validate_stability(results, context={"alpha": alpha})
+    validation = findings_to_dict(findings)
+    elapsed = time.perf_counter() - t0
+    telem = make_telemetry(elapsed, False, len(surfaces))
+
+    return make_envelope("compute_stability_derivatives", run_id, inputs, results, validation, telem)
 
 
 # ---------------------------------------------------------------------------
@@ -808,20 +929,28 @@ async def run_optimization(
             "final_results": final_results,
         }
 
+    t0 = time.perf_counter()
     result = await asyncio.to_thread(_suppress_output, _run)
+    inputs = {
+        "analysis_type": analysis_type, "objective": objective,
+        "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
+        "density": density,
+    }
     run_id = _artifacts.save(
         session_id=session_id,
         analysis_type="optimization",
         tool_name="run_optimization",
         surfaces=surfaces,
-        parameters={
-            "analysis_type": analysis_type, "objective": objective,
-            "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
-            "density": density,
-        },
+        parameters=inputs,
         results=result,
     )
-    return {**result, "run_id": run_id}
+
+    findings = validate_optimization(result, context={"analysis_type": analysis_type})
+    validation = findings_to_dict(findings)
+    elapsed = time.perf_counter() - t0
+    telem = make_telemetry(elapsed, False, len(surfaces))
+
+    return make_envelope("run_optimization", run_id, inputs, result, validation, telem)
 
 
 # ---------------------------------------------------------------------------
@@ -910,6 +1039,375 @@ async def delete_artifact(
     if not deleted:
         raise ValueError(f"Artifact '{run_id}' not found")
     return {"status": "deleted", "run_id": run_id}
+
+
+# ---------------------------------------------------------------------------
+# Tools 12–18 — observability, tracing, visualization, session defaults
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def get_run(
+    run_id: Annotated[str, "Run ID to inspect"],
+    session_id: Annotated[str | None, "Session hint for faster lookup"] = None,
+) -> dict:
+    """Return a full manifest for a run: inputs, outputs, validation, cache state.
+
+    This is the primary 'what do I know about this run?' endpoint for agents.
+    It answers: what inputs were used, what came out, did it pass validation,
+    is the problem still cached, and what plot types are available.
+    """
+    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id)
+    if artifact is None:
+        raise ValueError(f"Run '{run_id}' not found in artifact store.")
+
+    meta = artifact.get("metadata", {})
+    results = artifact.get("results", {})
+    sid = meta.get("session_id", session_id or "default")
+    session = _sessions.get(sid)
+
+    # Cache status
+    surface_names = meta.get("surfaces", [])
+    analysis_type = meta.get("analysis_type", "aero")
+    cache_info = session.cache_status(surface_names, analysis_type)
+    cache_info["pinned"] = session.is_pinned(run_id)
+
+    # Determine which detail levels are available
+    has_standard = bool(results.get("standard_detail"))
+    has_mesh = bool(session.get_mesh_snapshot(run_id))
+
+    # Plot types available given what's stored
+    available_plots = ["drag_polar"] if analysis_type == "drag_polar" else ["lift_distribution"]
+    if analysis_type == "aerostruct":
+        available_plots.append("stress_distribution")
+    if has_mesh or has_standard:
+        available_plots.append("planform")
+    conv = session.get_convergence(run_id)
+    if conv:
+        available_plots.append("convergence")
+
+    return {
+        "run_id": run_id,
+        "tool_name": meta.get("tool_name"),
+        "analysis_type": analysis_type,
+        "timestamp": meta.get("timestamp"),
+        "surfaces": surface_names,
+        "inputs": meta.get("parameters", {}),
+        "outputs_summary": {
+            k: v for k, v in results.items()
+            if k not in ("standard_detail",) and not isinstance(v, (list, dict))
+        },
+        "cache_state": cache_info,
+        "detail_levels_available": {
+            "summary": True,
+            "standard": has_standard,
+        },
+        "available_plots": available_plots,
+    }
+
+
+@mcp.tool()
+async def pin_run(
+    run_id: Annotated[str, "Run ID whose cached problem to pin"],
+    surfaces: Annotated[list[str], "Surface names used in this run"],
+    analysis_type: Annotated[str, "Analysis type: 'aero' or 'aerostruct'"] = "aero",
+    session_id: Annotated[str, "Session identifier"] = "default",
+) -> dict:
+    """Pin a cached OpenMDAO problem so it won't be evicted during multi-step workflows.
+
+    Use this after an analysis run when you plan to call get_detailed_results()
+    or visualize() later — it guarantees the live problem stays in memory.
+    Call unpin_run() when done to release memory.
+    """
+    session = _sessions.get(session_id)
+    pinned = session.pin_run(run_id, surfaces, analysis_type)
+    return {
+        "run_id": run_id,
+        "pinned": pinned,
+        "message": (
+            f"Run '{run_id}' pinned — cached problem will not be evicted."
+            if pinned
+            else f"No cached problem found for run '{run_id}' (surfaces={surfaces}, type={analysis_type})."
+        ),
+    }
+
+
+@mcp.tool()
+async def unpin_run(
+    run_id: Annotated[str, "Run ID to unpin"],
+    session_id: Annotated[str, "Session identifier"] = "default",
+) -> dict:
+    """Release a pin on a cached OpenMDAO problem, allowing it to be evicted."""
+    session = _sessions.get(session_id)
+    released = session.unpin_run(run_id)
+    return {
+        "run_id": run_id,
+        "released": released,
+        "message": (
+            f"Pin for run '{run_id}' released."
+            if released
+            else f"No pin found for run '{run_id}'."
+        ),
+    }
+
+
+@mcp.tool()
+async def get_detailed_results(
+    run_id: Annotated[str, "Run ID to retrieve details for"],
+    detail_level: Annotated[
+        str,
+        "Detail level: 'standard' = sectional Cl, stress, mesh (persisted); "
+        "'summary' = just the top-level results dict",
+    ] = "standard",
+    session_id: Annotated[str | None, "Session hint"] = None,
+) -> dict:
+    """Retrieve detailed results for a past run.
+
+    'standard' detail includes spanwise sectional Cl, von Mises stress
+    distributions, and mesh coordinates — captured at run time and
+    persisted in the artifact so they survive cache eviction.
+
+    'summary' returns only the top-level scalars (CL, CD, etc.).
+    """
+    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id)
+    if artifact is None:
+        raise ValueError(f"Run '{run_id}' not found.")
+
+    results = artifact.get("results", {})
+
+    if detail_level == "summary":
+        return {
+            "run_id": run_id,
+            "detail_level": "summary",
+            "results": {
+                k: v for k, v in results.items()
+                if not isinstance(v, (list, dict)) or k in ("surfaces",)
+            },
+        }
+    elif detail_level == "standard":
+        standard = results.get("standard_detail", {})
+        return {
+            "run_id": run_id,
+            "detail_level": "standard",
+            "sectional_data": standard.get("sectional_data", {}),
+            "mesh_snapshot": standard.get("mesh_snapshot", {}),
+        }
+    else:
+        raise ValueError(
+            f"Unknown detail_level {detail_level!r}. Use 'summary' or 'standard'."
+        )
+
+
+@mcp.tool()
+async def visualize(
+    run_id: Annotated[str, "Run ID to visualize"],
+    plot_type: Annotated[
+        str,
+        "Plot type — one of: lift_distribution, drag_polar, stress_distribution, "
+        "convergence, planform",
+    ],
+    session_id: Annotated[str | None, "Session hint for faster artifact lookup"] = None,
+    case_name: Annotated[str, "Human-readable label for the plot title"] = "",
+) -> dict:
+    """Generate a visualisation plot and return a base64-encoded PNG.
+
+    Response includes:
+      plot_type, run_id, format, width_px, height_px, image_hash, image_base64
+
+    Use image_hash for client-side caching — if the hash matches a cached image,
+    there is no need to re-render.
+
+    Available plot types:
+      lift_distribution   — spanwise Cl bar chart or per-surface CL
+      drag_polar          — CL vs CD and L/D vs alpha (requires drag polar run)
+      stress_distribution — spanwise von Mises stress and failure index
+      convergence         — solver residual history (if captured)
+      planform            — wing planform top view with optional deflection overlay
+    """
+    if plot_type not in PLOT_TYPES:
+        raise ValueError(
+            f"Unknown plot_type {plot_type!r}. "
+            f"Supported: {sorted(PLOT_TYPES)}"
+        )
+
+    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id)
+    if artifact is None:
+        raise ValueError(f"Run '{run_id}' not found.")
+
+    results = artifact.get("results", {})
+    standard = results.get("standard_detail", {})
+
+    # For planform, prefer session-stored mesh snapshot (faster), fall back to artifact
+    sid = artifact.get("metadata", {}).get("session_id", session_id or "default")
+    session = _sessions.get(sid)
+    mesh_snap = session.get_mesh_snapshot(run_id) or standard.get("mesh_snapshot", {})
+    mesh_data = {"mesh_snapshot": mesh_snap} if mesh_snap else {}
+    # Provide a mesh array for the planform plot from the first surface snapshot
+    for surf_name, surf_mesh in mesh_snap.items():
+        le = surf_mesh.get("leading_edge")
+        te = surf_mesh.get("trailing_edge")
+        if le and te:
+            # Build a minimal [nx=2, ny, 3] mesh from LE and TE rows
+            mesh_data["mesh"] = np.array([le, te]).tolist()
+        break
+
+    conv_data = session.get_convergence(run_id) or {}
+
+    # Inject sectional_data into results for lift_distribution / stress plots
+    plot_results = dict(results)
+    if standard.get("sectional_data"):
+        # Merge sectional_data into per-surface dicts
+        for surf_name, sect in standard["sectional_data"].items():
+            if surf_name in plot_results.get("surfaces", {}):
+                plot_results["surfaces"][surf_name]["sectional_data"] = sect
+        plot_results["sectional_data"] = standard.get("sectional_data", {})
+
+    plot_response = await asyncio.to_thread(
+        generate_plot,
+        plot_type, run_id, plot_results, conv_data, mesh_data, case_name,
+    )
+    return plot_response
+
+
+@mcp.tool()
+async def get_last_logs(
+    run_id: Annotated[str, "Run ID to retrieve server-side logs for"],
+) -> dict:
+    """Retrieve server-side log records captured during a run.
+
+    Agents cannot access server stderr, so this exposes recent log lines
+    through MCP for debugging convergence issues, unexpected outputs, etc.
+
+    Returns a list of log records with time, level, message, and logger name.
+    Returns empty list if no logs were captured for this run_id.
+    """
+    logs = get_run_logs(run_id)
+    if logs is None:
+        logs = []
+    return {
+        "run_id": run_id,
+        "log_count": len(logs),
+        "logs": logs,
+    }
+
+
+@mcp.tool()
+async def configure_session(
+    session_id: Annotated[str, "Session to configure"] = "default",
+    default_detail_level: Annotated[
+        str | None,
+        "Default detail level for get_detailed_results: 'summary' | 'standard'",
+    ] = None,
+    validation_severity_threshold: Annotated[
+        str | None,
+        "Minimum severity to include in validation block: 'error' | 'warning' | 'info'",
+    ] = None,
+    auto_visualize: Annotated[
+        list[str] | None,
+        "Plot types to auto-generate after each analysis (empty list = none). "
+        "E.g. ['lift_distribution', 'drag_polar']",
+    ] = None,
+    telemetry_mode: Annotated[
+        str | None,
+        "Override telemetry mode for this session: 'off' | 'logging' | 'otel'",
+    ] = None,
+    requirements: Annotated[
+        list[dict] | None,
+        "Set requirements checked against every analysis result. "
+        "Each requirement: {path, operator, value, label}. "
+        "Operators: ==, !=, <, <=, >, >=. "
+        "Example: [{\"path\": \"CL\", \"operator\": \">=\", \"value\": 0.4, \"label\": \"min_CL\"}]",
+    ] = None,
+) -> dict:
+    """Configure per-session defaults to reduce repeated arguments.
+
+    Settings persist until reset() is called or the server restarts.
+
+    Parameters
+    ----------
+    default_detail_level:
+        Default detail level when get_detailed_results is called.
+    validation_severity_threshold:
+        Filter validation findings below this severity from responses.
+        'error' = show only errors; 'warning' = show errors+warnings; 'info' = show all.
+    auto_visualize:
+        List of plot_type values to auto-generate after each analysis.
+        Plots are returned in the 'auto_plots' key of the response envelope.
+    telemetry_mode:
+        Override the server-wide OAS_TELEMETRY_MODE for this session.
+    requirements:
+        Dot-path requirements checked after every analysis in this session.
+        Failed requirements appear as "error" findings in the validation block.
+    """
+    session = _sessions.get(session_id)
+
+    updates: dict = {}
+    if default_detail_level is not None:
+        if default_detail_level not in ("summary", "standard"):
+            raise ValueError("default_detail_level must be 'summary' or 'standard'")
+        updates["default_detail_level"] = default_detail_level
+
+    if validation_severity_threshold is not None:
+        if validation_severity_threshold not in ("error", "warning", "info"):
+            raise ValueError("validation_severity_threshold must be 'error', 'warning', or 'info'")
+        updates["validation_severity_threshold"] = validation_severity_threshold
+
+    if auto_visualize is not None:
+        unknown = [p for p in auto_visualize if p not in PLOT_TYPES]
+        if unknown:
+            raise ValueError(
+                f"Unknown plot type(s) in auto_visualize: {unknown}. "
+                f"Supported: {sorted(PLOT_TYPES)}"
+            )
+        updates["auto_visualize"] = auto_visualize
+
+    if telemetry_mode is not None:
+        if telemetry_mode not in ("off", "logging", "otel"):
+            raise ValueError("telemetry_mode must be 'off', 'logging', or 'otel'")
+        updates["telemetry_mode"] = telemetry_mode
+
+    if updates:
+        session.configure(**updates)
+
+    if requirements is not None:
+        session.set_requirements(requirements)
+
+    return {
+        "session_id": session_id,
+        "status": "configured",
+        "current_defaults": session.defaults.to_dict(),
+        "requirements_count": len(session.requirements),
+    }
+
+
+@mcp.tool()
+async def set_requirements(
+    requirements: Annotated[
+        list[dict],
+        "List of requirement dicts: {path, operator, value, label}. "
+        "Operators: ==, !=, <, <=, >, >=. "
+        "Example: [{\"path\": \"surfaces.wing.failure\", \"operator\": \"<\", \"value\": 1.0}]",
+    ],
+    session_id: Annotated[str, "Session identifier"] = "default",
+) -> dict:
+    """Set requirements that are automatically checked against every analysis result.
+
+    Requirements use dot-path notation to access nested result values and
+    compare them using standard operators.  Failed requirements appear as
+    'error' severity findings in the validation block of each response.
+
+    Example requirements:
+      {"path": "CL", "operator": ">=", "value": 0.4, "label": "min_CL"}
+      {"path": "surfaces.wing.failure", "operator": "<", "value": 1.0, "label": "no_failure"}
+      {"path": "L_over_D", "operator": ">", "value": 10.0, "label": "min_LD"}
+    """
+    session = _sessions.get(session_id)
+    session.set_requirements(requirements)
+    return {
+        "session_id": session_id,
+        "requirements_set": len(requirements),
+        "requirements": requirements,
+    }
 
 
 # ---------------------------------------------------------------------------

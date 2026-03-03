@@ -12,6 +12,9 @@ An [MCP](https://modelcontextprotocol.io) server that wraps [OpenAeroStruct](htt
   - [Docker](#docker)
 - [Running the tests](#running-the-tests)
 - [Artifact storage](#artifact-storage)
+- [Response envelope](#response-envelope)
+- [Observability & validation](#observability--validation)
+- [Visualization](#visualization)
 - [How agents learn to use the server](#how-agents-learn-to-use-the-server)
 - [Architecture](#architecture)
 - [Tools reference](#tools-reference)
@@ -45,6 +48,19 @@ Setting up an OpenAeroStruct analysis normally requires 50–100 lines of OpenMD
 | `get_artifact` | Retrieve full metadata + results by `run_id` |
 | `get_artifact_summary` | Metadata only — no results payload |
 | `delete_artifact` | Remove a saved artifact permanently |
+
+**Observability & trust tools:**
+
+| Tool | Purpose |
+|------|---------|
+| `get_run` | Full run manifest: inputs, outputs, validation, cache state, available plots |
+| `pin_run` | Prevent a cached OpenMDAO problem from being evicted |
+| `unpin_run` | Release a cache pin |
+| `get_detailed_results` | Sectional Cl, von Mises stress, mesh coordinates |
+| `visualize` | Generate a base64 PNG plot for any completed run |
+| `get_last_logs` | Server-side log records for a run (debugging) |
+| `configure_session` | Set per-session defaults: detail level, auto-plots, requirements |
+| `set_requirements` | Define pass/fail criteria checked against every result |
 
 **Key properties:**
 
@@ -362,14 +378,14 @@ pip install pytest pytest-asyncio
 
 ```bash
 pytest
-# ~105 tests in ~5 s
+# ~209 tests in ~5 s
 ```
 
 ### Fast feedback — unit tests only (no OAS computation)
 
 ```bash
 pytest -m "not slow"
-# 68 tests in ~0.2 s
+# ~100 tests in ~0.3 s
 ```
 
 This covers:
@@ -377,12 +393,44 @@ This covers:
 - `test_validators.py` — input validation
 - `test_session.py` — session caching
 - `test_mesh.py` — mesh building and transforms
+- `test_envelope.py` — response envelope and error taxonomy
+- `test_validation.py` — physics/numerics validation and requirement checking
+- `test_telemetry.py` — structured logging and redaction
 
 ### Integration tests only
 
 ```bash
 pytest -m slow
-# 37 tests in ~4 s (runs real OAS computations)
+# ~40 tests in ~5 s (runs real OAS computations)
+```
+
+### Golden regression tests
+
+Physics invariant tests assert fundamental aerodynamic and structural properties that must hold on any platform:
+
+```bash
+pytest oas_mcp/tests/golden/test_golden_physics.py -v
+# 13 physics invariant tests (CD > 0, CL monotone with α, etc.)
+```
+
+Numeric baseline tests compare against stored reference values:
+
+```bash
+pytest oas_mcp/tests/golden/test_golden_numerics.py -v
+# 7 numeric baseline tests (requires golden_values.json)
+```
+
+To regenerate the baseline values after an OAS or dependency update:
+
+```bash
+python oas_mcp/tests/golden/generate_golden.py
+# Prints a diff summary before overwriting — requires human review
+```
+
+For deterministic numerics (recommended in CI):
+
+```bash
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 pytest
 ```
 
 ### Run a single test file
@@ -390,6 +438,7 @@ pytest -m slow
 ```bash
 pytest oas_mcp/tests/test_artifacts.py -v
 pytest oas_mcp/tests/test_tools.py -v
+pytest oas_mcp/tests/test_envelope.py -v
 ```
 
 ---
@@ -419,9 +468,9 @@ Run IDs are formatted as `YYYYMMDDTHHMMSS_{4hex}` — human-readable, chronologi
 **Step 1 — Run an analysis (artifact is saved automatically):**
 
 ```python
-result = await run_aero_analysis(surfaces=["wing"], alpha=5.0)
-# result now contains a "run_id" key
-run_id = result["run_id"]   # e.g. "20260301T143022_a7f3"
+envelope = await run_aero_analysis(surfaces=["wing"], alpha=5.0)
+run_id = envelope["run_id"]         # e.g. "20260301T143022_a7f3"
+result = envelope["results"]        # CL, CD, etc.
 ```
 
 **Step 2 — List saved artifacts:**
@@ -466,6 +515,92 @@ delete_artifact(run_id="20260301T143022_a7f3")
 ### Self-healing index
 
 If `index.json` is missing or corrupt (e.g. after a crash or manual file deletion), the index is automatically rebuilt by scanning all artifact files in the session directory. No data is lost.
+
+---
+
+## Response envelope
+
+Every analysis tool returns a **versioned response envelope** rather than a bare results dict. This gives agents a stable contract to program against and surfaces validation and telemetry alongside every result.
+
+```json
+{
+  "schema_version": "1.0",
+  "tool_name": "run_aero_analysis",
+  "run_id": "20260302T143022_a7f3",
+  "timestamp": "2026-03-02T14:30:22+00:00",
+  "inputs_hash": "sha256-a3f7c1...",
+  "results": { "CL": 0.546, "CD": 0.037, "L_over_D": 14.9, "surfaces": { ... } },
+  "validation": { "passed": true, "error_count": 0, "warning_count": 0, "findings": [] },
+  "telemetry": { "elapsed_s": 0.127, "oas.cache.hit": true, "oas.surface.count": 1 }
+}
+```
+
+Results are at `envelope["results"]`, not at the top level. The `run_id` in the envelope is the handle for all follow-up calls: `get_run`, `pin_run`, `get_detailed_results`, `visualize`, `get_last_logs`.
+
+For full details, see **[observability.md — Response envelope](observability.md#response-envelope)**.
+
+---
+
+## Observability & validation
+
+Every analysis response includes a `validation` block with automatically-run physics and numerics checks:
+
+- **CD > 0** — drag is always positive
+- **failure < 1.0** — structural utilisation below yield (failure > 1.0 = failure, not > 0)
+- **CL sign** — consistent with angle of attack direction
+- **L_equals_W residual** — lift ≈ weight trim for aerostructural runs
+- **Optimizer convergence** — `success == True` for optimization runs
+
+You can also define your own **custom requirements** that are checked against every result:
+
+```python
+set_requirements([
+    {"path": "CL",                    "operator": ">=", "value": 0.4,  "label": "min_CL"},
+    {"path": "surfaces.wing.failure", "operator": "<",  "value": 1.0,  "label": "no_failure"},
+])
+```
+
+Other observability tools:
+
+- **`get_run(run_id)`** — full manifest (inputs, outputs, validation, cache state, available plots)
+- **`pin_run` / `unpin_run`** — prevent cache eviction during multi-step workflows
+- **`get_last_logs(run_id)`** — server-side log records for debugging
+- **`configure_session`** — set per-session defaults for detail level, validation threshold, auto-plots
+
+For the complete guide with all check IDs, severity levels, and a worked multi-step example, see **[observability.md](observability.md)**.
+
+---
+
+## Visualization
+
+The `visualize` tool generates plots from any completed run and returns a 900×540 px base64 PNG:
+
+```python
+plot = visualize(run_id=run_id, plot_type="lift_distribution", case_name="CRM cruise")
+# plot["image_base64"] — standard base64-encoded PNG
+# plot["image_hash"]   — sha256 prefix for client-side caching
+```
+
+**Available plot types:**
+
+| Plot type | Description | Requires |
+|-----------|-------------|---------|
+| `lift_distribution` | Spanwise Cl bar chart | Any single-point run |
+| `drag_polar` | CL-CD parabola + L/D vs α | `compute_drag_polar` run |
+| `stress_distribution` | Von Mises stress + failure index | `run_aerostruct_analysis` run |
+| `convergence` | Solver residual history | Run with convergence captured |
+| `planform` | Top-down wing planform view | Any run (mesh snapshot persisted) |
+
+Call `get_run(run_id)["available_plots"]` to see which types are available for a given run before calling `visualize`.
+
+Auto-generate plots after every analysis:
+
+```python
+configure_session(auto_visualize=["lift_distribution"])
+# envelope["auto_plots"]["lift_distribution"] is now present in every analysis response
+```
+
+For the complete guide with all plot types, response format, and progressive zoom workflow, see **[visualization.md](visualization.md)**.
 
 ---
 
@@ -517,20 +652,35 @@ oas_mcp/
 ├── core/
 │   ├── artifacts.py   # ArtifactStore — filesystem-backed, thread-safe result persistence
 │   ├── auth.py        # KeycloakTokenVerifier — RS256 JWT validation for HTTP transport
-│   ├── defaults.py    # Default flight conditions and surface properties
-│   ├── validators.py  # Input validation with descriptive error messages
-│   ├── mesh.py        # generate_mesh() wrapper + sweep/dihedral/taper transforms
-│   ├── connections.py # connect_aero_surface() / connect_aerostruct_surface()
 │   ├── builders.py    # build_aero_problem() / build_aerostruct_problem() / build_optimization_problem()
-│   ├── results.py     # extract_aero_results() / extract_aerostruct_results()
-│   └── session.py     # Session / SessionManager — surface store + problem cache
+│   ├── connections.py # connect_aero_surface() / connect_aerostruct_surface()
+│   ├── convergence.py # ConvergenceMonitor, extract_convergence() — solver residual capture
+│   ├── defaults.py    # Default flight conditions and surface properties
+│   ├── envelope.py    # make_envelope() / make_error_envelope() — versioned response wrapper
+│   ├── errors.py      # UserInputError, SolverConvergenceError, CacheEvictedError, InternalError
+│   ├── mesh.py        # generate_mesh() wrapper + sweep/dihedral/taper transforms
+│   ├── plotting.py    # generate_plot() — 5 plot types, 900×540 px base64 PNG
+│   ├── requirements.py # check_requirements() — dot-path assertion engine
+│   ├── results.py     # extract_aero_results() / extract_aerostruct_results() / extract_standard_detail()
+│   ├── session.py     # Session / SessionManager — surface store, problem cache, pinning, defaults
+│   ├── telemetry.py   # span(), get_run_logs(), redact(), make_telemetry() — structured logging
+│   ├── validation.py  # validate_aero/aerostruct/drag_polar/stability/optimization()
+│   └── validators.py  # Input validation with descriptive error messages
 └── tests/
-    ├── conftest.py          # Fixtures: isolate_artifacts (autouse), clean_session (autouse), aero_wing, struct_wing
-    ├── test_artifacts.py    # Unit tests for ArtifactStore (20 tests, no OAS required)
-    ├── test_validators.py   # Unit tests for validators
-    ├── test_session.py      # Unit tests for session caching
-    ├── test_mesh.py         # Unit tests for mesh building and transforms
-    └── test_tools.py        # Integration tests for all tools
+    ├── conftest.py               # Fixtures: isolate_artifacts, clean_session, aero_wing, struct_wing
+    ├── test_artifacts.py         # Unit tests for ArtifactStore (no OAS required)
+    ├── test_envelope.py          # Unit tests for envelope + error taxonomy
+    ├── test_mesh.py              # Unit tests for mesh building and transforms
+    ├── test_session.py           # Unit tests for session caching + pinning
+    ├── test_telemetry.py         # Unit tests for logging and redaction
+    ├── test_tools.py             # Integration tests for all tools
+    ├── test_validation.py        # Unit tests for physics checks + requirements
+    ├── test_validators.py        # Unit tests for input validators
+    └── golden/
+        ├── test_golden_physics.py  # 13 platform-independent physics invariant tests
+        ├── test_golden_numerics.py # 7 numeric baseline tests vs golden_values.json
+        ├── golden_values.json      # Stored baseline values with reproducibility header
+        └── generate_golden.py      # Regenerates baselines with diff summary
 ```
 
 ### How a tool call flows
@@ -547,9 +697,13 @@ MCP client
                                    ├─ builders.py: AeroPoint + IndepVarComp
                                    ├─ prob.setup()   ← expensive, done once
                                    └─ session.store_problem()
-                 └─ results.extract_aero_results() → plain dict
-            └─ _artifacts.save(results)          ← thread-safe file I/O
-            └─ return {**results, "run_id": ...}
+                 └─ results.extract_aero_results() → (results, standard_detail)
+                      └─ results.extract_standard_detail() → sectional Cl, mesh snapshot
+            └─ _artifacts.save(results + standard_detail)  ← thread-safe file I/O
+            └─ validation.validate_aero(results) → findings
+            └─ check_requirements(session.requirements, results)
+            └─ make_telemetry(elapsed, cache_hit, ...)
+            └─ make_envelope(tool_name, run_id, inputs, results, validation, telemetry)
 ```
 
 ### Session caching
@@ -798,6 +952,146 @@ Raises `ValueError` if the run ID is not found.
 
 ---
 
+### `get_run`
+
+Return a full manifest for a completed run: inputs, outputs, validation, cache state, and available plot types.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `run_id` | str | — | Run ID to inspect |
+| `session_id` | str | `None` | Optional hint for faster lookup |
+
+**Returns:** `{run_id, tool_name, analysis_type, timestamp, surfaces, inputs, outputs_summary, cache_state, detail_levels_available, available_plots}`
+
+Use `available_plots` to know which `visualize()` calls will succeed. See [observability.md](observability.md#run-manifest-get_run) for a full example.
+
+---
+
+### `pin_run`
+
+Pin a cached OpenMDAO problem to prevent eviction during multi-step workflows.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `run_id` | str | — | Run ID to pin |
+| `surfaces` | str[] | — | Surface names used in the run |
+| `analysis_type` | str | `"aero"` | `"aero"` or `"aerostruct"` |
+| `session_id` | str | `"default"` | Session identifier |
+
+**Returns:** `{run_id, pinned, message}`
+
+Call `unpin_run(run_id)` when finished to release memory.
+
+---
+
+### `unpin_run`
+
+Release a cache pin, allowing the OpenMDAO problem to be evicted.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `run_id` | str | — | Run ID to unpin |
+| `session_id` | str | `"default"` | Session identifier |
+
+**Returns:** `{run_id, released, message}`
+
+---
+
+### `get_detailed_results`
+
+Retrieve richer data than the top-level scalars in the analysis response.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `run_id` | str | — | Run ID to retrieve details for |
+| `detail_level` | str | `"standard"` | `"summary"` or `"standard"` |
+| `session_id` | str | `None` | Optional hint |
+
+**Returns:**
+
+- `"summary"` — `{run_id, detail_level, results: {top-level scalars}}`
+- `"standard"` — `{run_id, detail_level, sectional_data: {surf: {y_span_norm, Cl, vonmises_MPa, failure_index}}, mesh_snapshot: {surf: {leading_edge, trailing_edge, nx, ny}}}`
+
+Standard detail is persisted at run time and survives cache eviction. See [observability.md](observability.md#detailed-results).
+
+---
+
+### `visualize`
+
+Generate a plot and return a base64-encoded PNG.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `run_id` | str | — | Run ID to visualise |
+| `plot_type` | str | — | One of: `lift_distribution`, `drag_polar`, `stress_distribution`, `convergence`, `planform` |
+| `session_id` | str | `None` | Optional hint |
+| `case_name` | str | `""` | Human-readable label for the plot title |
+
+**Returns:** `{plot_type, run_id, format, width_px, height_px, image_hash, image_base64}`
+
+All plots are 900×540 px PNG. `image_hash` is the first 8 hex chars of SHA-256(png_bytes) for client-side caching. See [visualization.md](visualization.md) for full guide.
+
+---
+
+### `get_last_logs`
+
+Retrieve server-side log records captured during a run.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `run_id` | str | — | Run ID to retrieve logs for |
+
+**Returns:** `{run_id, log_count, logs: [{time, level, message, logger}]}`
+
+Logs are retained for the last 100 runs (configurable via `OAS_LOG_MAX_RUNS`). Useful for debugging `SOLVER_CONVERGENCE_ERROR` and `INTERNAL_ERROR` responses. See [observability.md](observability.md#server-logs-get_last_logs).
+
+---
+
+### `configure_session`
+
+Set per-session defaults that apply to all subsequent calls in the session.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `session_id` | str | `"default"` | Session to configure |
+| `default_detail_level` | str | `None` | `"summary"` or `"standard"` |
+| `validation_severity_threshold` | str | `None` | `"error"`, `"warning"`, or `"info"` |
+| `auto_visualize` | str[] | `None` | Plot types to auto-generate with each analysis |
+| `telemetry_mode` | str | `None` | `"off"`, `"logging"`, or `"otel"` |
+| `requirements` | dict[] | `None` | Requirements checked against every result |
+
+**Returns:** `{session_id, status, current_defaults, requirements_count}`
+
+See [observability.md](observability.md#session-configuration-configure_session) for full parameter documentation.
+
+---
+
+### `set_requirements`
+
+Define pass/fail criteria that are automatically checked against every analysis result in the session.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `requirements` | dict[] | — | List of `{path, operator, value, label}` dicts |
+| `session_id` | str | `"default"` | Session identifier |
+
+**Operators:** `==`, `!=`, `<`, `<=`, `>`, `>=`
+
+**Example:**
+
+```python
+set_requirements([
+    {"path": "CL",                    "operator": ">=", "value": 0.4,  "label": "min_CL"},
+    {"path": "surfaces.wing.failure", "operator": "<",  "value": 1.0,  "label": "no_failure"},
+])
+```
+
+**Returns:** `{session_id, requirements_set, requirements}`
+
+Failed requirements appear as `"error"` severity findings in the `validation` block of every subsequent analysis response. See [observability.md](observability.md#custom-requirements).
+
+---
+
 ## Example walkthrough
 
 This example defines a CRM wing, runs a cruise-point analysis, sweeps the drag polar, checks stability, runs an aerostructural analysis, optimises twist for minimum drag, and then retrieves the saved results.
@@ -825,7 +1119,7 @@ create_surface(
 ### Step 2 — Single-point aero analysis
 
 ```python
-result = run_aero_analysis(
+envelope = run_aero_analysis(
     surfaces        = ["wing"],
     velocity        = 248.136,   # m/s (~Mach 0.84 at cruise altitude)
     alpha           = 5.0,       # deg
@@ -833,14 +1127,21 @@ result = run_aero_analysis(
     reynolds_number = 1e6,
     density         = 0.38,      # kg/m³ (≈ 11 000 m altitude)
 )
-run_id_aero = result["run_id"]   # e.g. "20260301T143022_a7f3"
+run_id_aero = envelope["run_id"]   # e.g. "20260301T143022_a7f3"
+result = envelope["results"]       # CL, CD, CM, etc.
 ```
 
 ```json
 {
-  "CL": 0.5459, "CD": 0.0367, "CM": -0.6844, "L_over_D": 14.88,
-  "surfaces": {"wing": {"CL": 0.5459, "CDi": 0.0229, "CDv": 0.0123}},
-  "run_id": "20260301T143022_a7f3"
+  "schema_version": "1.0",
+  "tool_name": "run_aero_analysis",
+  "run_id": "20260301T143022_a7f3",
+  "results": {
+    "CL": 0.5459, "CD": 0.0367, "CM": -0.6844, "L_over_D": 14.88,
+    "surfaces": {"wing": {"CL": 0.5459, "CDi": 0.0229, "CDv": 0.0123}}
+  },
+  "validation": { "passed": true, "error_count": 0, "findings": [] },
+  "telemetry": { "elapsed_s": 0.12, "oas.cache.hit": false }
 }
 ```
 
@@ -891,7 +1192,7 @@ compute_stability_derivatives(
 ### Step 5 — Coupled aerostructural analysis
 
 ```python
-run_aerostruct_analysis(
+struct_envelope = run_aerostruct_analysis(
     surfaces       = ["wing"],
     velocity       = 248.136,
     alpha          = 5.0,
@@ -902,19 +1203,24 @@ run_aerostruct_analysis(
     speed_of_sound = 295.4,
     load_factor    = 1.0,
 )
+struct_result = struct_envelope["results"]
 ```
 
 ```json
 {
-  "CL": 0.5281, "CD": 0.0364, "L_over_D": 14.50,
-  "fuelburn": 165564, "structural_mass": 124259,
-  "L_equals_W": 0.496,
-  "surfaces": {"wing": {"failure": -0.7676, "structural_mass_kg": 124259}},
-  "run_id": "20260301T143055_b2c1"
+  "schema_version": "1.0",
+  "run_id": "20260301T143055_b2c1",
+  "results": {
+    "CL": 0.5281, "CD": 0.0364, "L_over_D": 14.50,
+    "fuelburn": 165564, "structural_mass": 124259,
+    "L_equals_W": 0.496,
+    "surfaces": {"wing": {"failure": -0.7676, "structural_mass_kg": 124259}}
+  },
+  "validation": { "passed": true, "error_count": 0, "findings": [] }
 }
 ```
 
-`failure < 0` means no structural failure at this load condition.
+`failure < 0` means no structural failure at this load condition. Values above 1.0 indicate structural failure.
 
 ### Step 6 — Aerodynamic optimisation
 
@@ -947,7 +1253,28 @@ run_optimization(
 }
 ```
 
-### Step 7 — Retrieve a past result
+### Step 7 — Inspect and visualize a past result
+
+```python
+run_id = "20260301T143022_a7f3"   # from step 2
+
+# Full run manifest (inputs, outputs, cache state, available plots)
+manifest = get_run(run_id)
+print(manifest["available_plots"])         # ['lift_distribution', 'planform']
+
+# Get sectional data
+details = get_detailed_results(run_id, detail_level="standard")
+cl_dist = details["sectional_data"]["wing"]["Cl"]
+
+# Generate a lift distribution plot
+plot = visualize(run_id=run_id, plot_type="lift_distribution", case_name="CRM cruise α=5°")
+# plot["image_base64"] — 900×540 px PNG
+
+# Server-side debug logs if anything looked unexpected
+logs = get_last_logs(run_id)
+```
+
+### Step 8 — Retrieve past artifacts
 
 ```python
 # Look up the aero analysis saved in step 2
@@ -983,3 +1310,13 @@ The server supports a full analysis loop: define geometry, run aerodynamic/aeros
 **Structural sizing.** The default `thickness_cp` is `0.1 * root_chord` at every control point. For realistic structural analysis, provide explicit values or let the solver size the structure with a `failure` constraint via `run_optimization`.
 
 **Artifact `session_id` hint.** If you know which session produced a `run_id`, passing `session_id` to `get_artifact`, `get_artifact_summary`, and `delete_artifact` makes the lookup O(1) instead of scanning all session directories.
+
+**Always check `validation.passed`.** Every analysis response includes automatic physics checks. Before acting on results, check `envelope["validation"]["passed"]`. If `False`, review `envelope["validation"]["findings"]` for check ID, message, and remediation hint.
+
+**Failure index threshold is 1.0, not 0.** A `failure` value of 0.9 means the structure is near its limit but has not failed. Values above 1.0 indicate structural failure. This is a KS-aggregated von Mises utilisation ratio.
+
+**Use `pin_run` in multi-step workflows.** If an agent runs an analysis, then does several other tool calls, then wants `get_detailed_results` or `visualize`, pin the run after the analysis to guarantee the cached problem is still in memory. Unpin when done.
+
+**`get_detailed_results` survives cache eviction.** Standard-level detail (sectional Cl, von Mises, mesh coordinates) is persisted to disk at run time. You can call `get_detailed_results(run_id, "standard")` at any time without needing the live problem in memory.
+
+**Set project requirements once with `configure_session`.** Rather than manually checking CL ≥ 0.4, failure < 1.0, etc. after every analysis, set these as session requirements. They appear automatically in the validation block of every subsequent response.

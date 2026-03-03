@@ -45,7 +45,11 @@ include = ["openaerostruct*", "oas_mcp*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths   = ["oas_mcp/tests"]
-markers     = ["slow: integration tests that run real OAS computations (deselect with -m 'not slow')"]
+markers     = [
+    "slow: integration tests that run real OAS computations (deselect with -m 'not slow')",
+    "golden_physics: Tier-1 physics invariant golden tests (platform-independent)",
+    "golden_numerics: Tier-2 numeric baseline golden tests (may vary by platform/deps)",
+]
 addopts     = "-v"
 
 [tool.setuptools.package-data]
