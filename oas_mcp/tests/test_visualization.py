@@ -12,6 +12,7 @@ import numpy as np
 
 from mcp.server.fastmcp.utilities.types import Image
 from oas_mcp.core.plotting import (
+    PlotResult,
     plot_lift_distribution,
     plot_stress_distribution,
     plot_planform,
@@ -27,12 +28,19 @@ from oas_mcp.core.plotting import (
 _RUN_ID = "test-run-0000"
 
 
-def _is_valid_png(img: Image) -> bool:
-    """Check that img is an Image with PNG magic bytes and non-trivial size."""
+def _is_valid_plot(result: PlotResult) -> bool:
+    """Check that result is a PlotResult with a valid PNG image and metadata."""
+    assert isinstance(result, PlotResult), f"Expected PlotResult, got {type(result)}"
+    # Validate image
+    img = result.image
     assert isinstance(img, Image), f"Expected Image, got {type(img)}"
     data = img.data if isinstance(img.data, bytes) else bytes(img.data)
     assert data[:4] == b"\x89PNG", "PNG magic bytes missing"
     assert len(data) > 500, f"Image too small ({len(data)} bytes)"
+    # Validate metadata
+    meta = result.metadata
+    for key in ("plot_type", "run_id", "format", "image_hash"):
+        assert key in meta, f"Metadata missing key: {key!r}"
     return True
 
 
@@ -57,7 +65,7 @@ class TestLiftDistribution:
             "surfaces": {},
         }
         img = plot_lift_distribution(_RUN_ID, results)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_matching_lengths(self):
         """Cl and y same length → line plot still renders."""
@@ -72,7 +80,7 @@ class TestLiftDistribution:
             "surfaces": {},
         }
         img = plot_lift_distribution(_RUN_ID, results)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_fallback_bar_chart(self):
         """No sectional Cl → bar chart fallback still renders."""
@@ -81,13 +89,13 @@ class TestLiftDistribution:
             "surfaces": {"wing": {"CL": 0.4}},
         }
         img = plot_lift_distribution(_RUN_ID, results)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_fallback_missing_sectional_data(self):
         """Completely empty results → fallback bar chart with no bars."""
         results = {"surfaces": {}}
         img = plot_lift_distribution(_RUN_ID, results)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
 
 # ---------------------------------------------------------------------------
@@ -121,19 +129,19 @@ class TestStressDistribution:
         """vonmises_MPa with ny-1 values renders a line plot."""
         results = self._make_struct_results(ny=5, include_failure=False)
         img = plot_stress_distribution(_RUN_ID, results)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_failure_index_present(self):
         """failure_index renders on both stress and failure panels."""
         results = self._make_struct_results(ny=5, include_failure=True)
         img = plot_stress_distribution(_RUN_ID, results)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_no_stress_data_fallback(self):
         """No stress data → 'No stress data available' placeholder renders."""
         results = {"surfaces": {"wing": {}}}
         img = plot_stress_distribution(_RUN_ID, results)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_scalar_fallback(self):
         """Only scalar max_vonmises_Pa → axhline fallback renders."""
@@ -147,7 +155,7 @@ class TestStressDistribution:
             }
         }
         img = plot_stress_distribution(_RUN_ID, results)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
 
 # ---------------------------------------------------------------------------
@@ -179,19 +187,19 @@ class TestPlanform:
         """Planform renders without error."""
         mesh_data = self._make_mesh_data()
         img = plot_planform(_RUN_ID, mesh_data)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_correct_nx_in_title(self):
         """Subtitle shows original nx from mesh_snapshot, not reconstructed 2."""
         # We just verify it renders; correctness of nx verified by integration tests
         mesh_data = self._make_mesh_data(nx=5, ny=9)
         img = plot_planform(_RUN_ID, mesh_data)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_no_mesh_data_fallback(self):
         """Empty mesh_data → placeholder text renders."""
         img = plot_planform(_RUN_ID, {})
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +217,7 @@ class TestOptDvEvolution:
         }
         opt_hist = {"dv_history": dv_history}
         img = plot_opt_dv_evolution(_RUN_ID, opt_hist)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_vector_dv(self):
         """Vector DV (list per iteration) rendered as mean, normalized."""
@@ -222,18 +230,18 @@ class TestOptDvEvolution:
         }
         opt_hist = {"dv_history": dv_history}
         img = plot_opt_dv_evolution(_RUN_ID, opt_hist)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_no_history_fallback(self):
         """Empty dv_history → placeholder text renders."""
         img = plot_opt_dv_evolution(_RUN_ID, {})
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_zero_initial_dv(self):
         """DV starting at zero → normalized to 1.0 (no divide-by-zero)."""
         dv_history = {"alpha": [0.0, 0.1, 0.2]}
         img = plot_opt_dv_evolution(_RUN_ID, {"dv_history": dv_history})
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +257,7 @@ class TestOptComparison:
             "final_dvs": {"twist": 4.0, "thickness": 0.06},
         }
         img = plot_opt_comparison(_RUN_ID, opt_hist)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_prefers_dv_history(self):
         """Ratio computed from dv_history when available."""
@@ -259,12 +267,12 @@ class TestOptComparison:
             "dv_history": {"twist": [5.0, 4.5, 4.0]},
         }
         img = plot_opt_comparison(_RUN_ID, opt_hist)
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
     def test_no_dvs_fallback(self):
         """No DV data → placeholder text renders."""
         img = plot_opt_comparison(_RUN_ID, {})
-        assert _is_valid_png(img)
+        assert _is_valid_plot(img)
 
 
 # ---------------------------------------------------------------------------
@@ -285,8 +293,13 @@ class TestAeroVisualizationE2E:
         envelope = await run_aero_analysis(surfaces=["wing"])
         run_id = envelope["run_id"]
 
-        img = await visualize(run_id=run_id, plot_type="lift_distribution")
-        assert _is_valid_png(img)
+        response = await visualize(run_id=run_id, plot_type="lift_distribution")
+        assert isinstance(response, list) and len(response) == 2
+        metadata, img = response
+        assert isinstance(metadata, dict)
+        assert metadata["plot_type"] == "lift_distribution"
+        assert "image_hash" in metadata
+        assert isinstance(img, Image)
 
     async def test_planform_e2e(self, aero_wing):
         from oas_mcp.server import run_aero_analysis, visualize
@@ -294,8 +307,12 @@ class TestAeroVisualizationE2E:
         envelope = await run_aero_analysis(surfaces=["wing"])
         run_id = envelope["run_id"]
 
-        img = await visualize(run_id=run_id, plot_type="planform")
-        assert _is_valid_png(img)
+        response = await visualize(run_id=run_id, plot_type="planform")
+        assert isinstance(response, list) and len(response) == 2
+        metadata, img = response
+        assert isinstance(metadata, dict)
+        assert metadata["plot_type"] == "planform"
+        assert isinstance(img, Image)
 
     async def test_sectional_data_extraction_aero(self, aero_wing):
         """Aero run stores Cl (ny-1) and y_span_norm (ny) in artifact."""
@@ -331,8 +348,12 @@ class TestAerostructVisualizationE2E:
         envelope = await run_aerostruct_analysis(surfaces=["wing"])
         run_id = envelope["run_id"]
 
-        img = await visualize(run_id=run_id, plot_type="stress_distribution")
-        assert _is_valid_png(img)
+        response = await visualize(run_id=run_id, plot_type="stress_distribution")
+        assert isinstance(response, list) and len(response) == 2
+        metadata, img = response
+        assert isinstance(metadata, dict)
+        assert metadata["plot_type"] == "stress_distribution"
+        assert isinstance(img, Image)
 
     async def test_sectional_data_extraction_aerostruct(self, struct_wing):
         """Aerostruct run stores vonmises_MPa and failure_index (ny-1 each)."""

@@ -27,7 +27,6 @@ from typing import Annotated, Any
 
 import numpy as np
 from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.utilities.types import Image
 
 from .core.builders import (
     build_aero_problem,
@@ -216,10 +215,10 @@ async def _apply_auto_plots(
     auto_plots: dict[str, str | None] = {}
     for plot_type in plot_types:
         try:
-            img = await asyncio.to_thread(
+            plot_result = await asyncio.to_thread(
                 generate_plot, plot_type, run_id, plot_results, {}, mesh_data, ""
             )
-            auto_plots[plot_type] = getattr(img, "_hash", None)
+            auto_plots[plot_type] = plot_result.metadata["image_hash"]
         except Exception:
             pass  # don't let auto-plot errors block analysis results
 
@@ -1316,7 +1315,7 @@ async def visualize(
     ],
     session_id: Annotated[str | None, "Session hint for faster artifact lookup"] = None,
     case_name: Annotated[str, "Human-readable label for the plot title"] = "",
-) -> Image:
+) -> list:
     """Generate a visualisation plot and return a base64-encoded PNG.
 
     Response includes:
@@ -1392,11 +1391,11 @@ async def visualize(
             "final_dvs": results.get("optimized_design_variables", {}),
         }
 
-    plot_response = await asyncio.to_thread(
+    plot_result = await asyncio.to_thread(
         generate_plot,
         plot_type, run_id, plot_results, conv_data, mesh_data, case_name, opt_history,
     )
-    return plot_response
+    return [plot_result.metadata, plot_result.image]
 
 
 @mcp.tool()

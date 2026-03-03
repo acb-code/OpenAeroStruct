@@ -1,9 +1,10 @@
 """Matplotlib-based plot generation for OAS MCP results.
 
-All plots return an ``mcp.server.fastmcp.utilities.types.Image`` object that
-FastMCP auto-converts to ``ImageContent`` in the MCP response.  A SHA-256
-hash is embedded in the Image object's ``_hash`` attribute for client-side
-caching (accessible via ``img._hash``).
+All plots return a ``PlotResult`` containing an MCP ``Image`` object and a
+metadata dict.  FastMCP recursively converts a ``[dict, Image]`` list return
+to ``[TextContent, ImageContent]``, so text-only clients (e.g. ChatGPT MCP
+connector) receive the metadata while image-capable clients (Claude) also get
+the rendered PNG.
 
 Supported plot types (strict enum)
 -----------------------------------
@@ -28,11 +29,24 @@ from __future__ import annotations
 
 import hashlib
 import io
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from mcp.server.fastmcp.utilities.types import Image
+
+
+@dataclass
+class PlotResult:
+    """Container for a generated plot and its metadata.
+
+    ``image`` is an MCP Image object (FastMCP converts it to ImageContent).
+    ``metadata`` is a plain dict suitable for TextContent serialisation so
+    text-only MCP clients still receive structured plot information.
+    """
+    image: Image
+    metadata: dict  # plot_type, run_id, format, width_px, height_px, image_hash, note
 
 # Lazy matplotlib import — avoid importing at module load to keep startup fast.
 _MPL_AVAILABLE: bool | None = None
@@ -85,14 +99,17 @@ _DPI = 150            # → 900 × 540 px
 # ---------------------------------------------------------------------------
 
 
-def _fig_to_response(fig, run_id: str, plot_type: str) -> Image:
-    """Convert a matplotlib Figure to an MCP Image object.
+def _fig_to_response(fig, run_id: str, plot_type: str) -> PlotResult:
+    """Convert a matplotlib Figure to a PlotResult (Image + metadata dict).
 
-    FastMCP auto-converts ``Image`` returns to ``ImageContent``, so the plot
-    is delivered as a proper image attachment rather than raw base64 text.
-    The SHA-256 hash is stored on ``img._hash`` for client-side caching.
+    Pixel dimensions are captured before closing the figure so they reflect
+    the actual rendered size (bbox_inches="tight" can adjust the canvas).
+    The SHA-256 hash in the metadata is used for client-side caching.
     """
     _, plt = _require_mpl()
+    # Capture dimensions *before* savefig/close — tight bbox may change them
+    width_px = round(fig.get_size_inches()[0] * _DPI)
+    height_px = round(fig.get_size_inches()[1] * _DPI)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
@@ -100,8 +117,19 @@ def _fig_to_response(fig, run_id: str, plot_type: str) -> Image:
     png_bytes = buf.read()
     sha = "sha256-" + hashlib.sha256(png_bytes).hexdigest()[:16]
     img = Image(data=png_bytes, format="png")
-    img._hash = sha  # type: ignore[attr-defined]
-    return img
+    metadata = {
+        "plot_type": plot_type,
+        "run_id": run_id,
+        "format": "png",
+        "width_px": width_px,
+        "height_px": height_px,
+        "image_hash": sha,
+        "note": (
+            "Image attached as ImageContent. "
+            "If not visible, use get_detailed_results() for the underlying data."
+        ),
+    }
+    return PlotResult(image=img, metadata=metadata)
 
 
 def _make_fig(run_id: str, title: str) -> tuple:
@@ -117,7 +145,7 @@ def _make_fig(run_id: str, title: str) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def plot_lift_distribution(run_id: str, results: dict, case_name: str = "") -> dict:
+def plot_lift_distribution(run_id: str, results: dict, case_name: str = "") -> PlotResult:
     """Plot spanwise sectional Cl distribution.
 
     Looks for ``sectional_data.Cl`` (list of floats) and
@@ -179,7 +207,7 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "") -> d
 # ---------------------------------------------------------------------------
 
 
-def plot_drag_polar(run_id: str, results: dict, case_name: str = "") -> dict:
+def plot_drag_polar(run_id: str, results: dict, case_name: str = "") -> PlotResult:
     """Plot CL vs CD and L/D vs alpha side-by-side."""
     _require_mpl()
     import matplotlib.pyplot as plt
@@ -235,7 +263,7 @@ def plot_drag_polar(run_id: str, results: dict, case_name: str = "") -> dict:
 # ---------------------------------------------------------------------------
 
 
-def plot_stress_distribution(run_id: str, results: dict, case_name: str = "") -> dict:
+def plot_stress_distribution(run_id: str, results: dict, case_name: str = "") -> PlotResult:
     """Plot spanwise von Mises stress and failure index distribution.
 
     Looks for per-surface ``sectional_data.vonmises_MPa`` and
@@ -340,7 +368,7 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "") ->
 # ---------------------------------------------------------------------------
 
 
-def plot_convergence(run_id: str, convergence_data: dict, case_name: str = "") -> dict:
+def plot_convergence(run_id: str, convergence_data: dict, case_name: str = "") -> PlotResult:
     """Plot solver residual history.
 
     Parameters
@@ -390,7 +418,7 @@ def plot_convergence(run_id: str, convergence_data: dict, case_name: str = "") -
 # ---------------------------------------------------------------------------
 
 
-def plot_planform(run_id: str, mesh_data: dict, case_name: str = "") -> dict:
+def plot_planform(run_id: str, mesh_data: dict, case_name: str = "") -> PlotResult:
     """Plot wing planform (top view) with optional deflection overlay.
 
     Parameters
@@ -459,7 +487,7 @@ def plot_planform(run_id: str, mesh_data: dict, case_name: str = "") -> dict:
 # ---------------------------------------------------------------------------
 
 
-def plot_opt_history(run_id: str, optimization_history: dict, case_name: str = "") -> Image:
+def plot_opt_history(run_id: str, optimization_history: dict, case_name: str = "") -> PlotResult:
     """Plot optimizer objective convergence history.
 
     Shows the objective value per optimizer iteration.  If only initial and
@@ -521,7 +549,7 @@ def plot_opt_history(run_id: str, optimization_history: dict, case_name: str = "
 # ---------------------------------------------------------------------------
 
 
-def plot_opt_dv_evolution(run_id: str, optimization_history: dict, case_name: str = "") -> Image:
+def plot_opt_dv_evolution(run_id: str, optimization_history: dict, case_name: str = "") -> PlotResult:
     """Plot design variable evolution over optimizer iterations.
 
     For vector DVs (e.g. twist_cp), plots the mean of the DV vector per
@@ -590,7 +618,7 @@ def plot_opt_dv_evolution(run_id: str, optimization_history: dict, case_name: st
 # ---------------------------------------------------------------------------
 
 
-def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str = "") -> Image:
+def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str = "") -> PlotResult:
     """Plot before/after comparison of design variable values.
 
     Generates a grouped bar chart with one group per DV, showing the initial
@@ -679,8 +707,8 @@ def generate_plot(
     mesh_data: dict | None = None,
     case_name: str = "",
     optimization_history: dict | None = None,
-) -> Image:
-    """Generate a plot and return an MCP Image object.
+) -> PlotResult:
+    """Generate a plot and return a PlotResult (Image + metadata).
 
     Parameters
     ----------
@@ -702,9 +730,8 @@ def generate_plot(
 
     Returns
     -------
-    ``mcp.server.fastmcp.utilities.types.Image`` — FastMCP auto-converts this
-    to ``ImageContent`` so the plot is delivered as a proper image attachment.
-    The SHA-256 hash is on ``img._hash`` for client-side caching.
+    PlotResult — contains ``image`` (MCP Image, converts to ImageContent) and
+    ``metadata`` (plain dict for TextContent / text-only clients).
     """
     if plot_type not in PLOT_TYPES:
         raise ValueError(
