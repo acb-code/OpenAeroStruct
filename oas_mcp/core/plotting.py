@@ -145,8 +145,13 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "") -> d
                 if Cl and y:
                     break
 
-    if Cl and y and len(Cl) == len(y):
-        ax.plot(y, Cl, "b-o", markersize=3, linewidth=1.5)
+    if Cl and y and (len(Cl) == len(y) or len(Cl) == len(y) - 1):
+        if len(Cl) == len(y) - 1:
+            # Cl has ny-1 panel values, y has ny node values → use panel midpoints
+            y_plot = [(y[i] + y[i + 1]) / 2.0 for i in range(len(Cl))]
+        else:
+            y_plot = y
+        ax.plot(y_plot, Cl, "b-o", markersize=3, linewidth=1.5)
         ax.set_xlabel("Normalised spanwise station η = 2y/b  [—]")
         ax.set_ylabel("Sectional lift coefficient  Cl  [—]")
         ax.set_xlim(0, 1)
@@ -432,12 +437,17 @@ def plot_planform(run_id: str, mesh_data: dict, case_name: str = "") -> dict:
         ax.plot(def_te[:, 1], def_te[:, 0], "r--", linewidth=1.0, alpha=0.7)
 
     ax.set_xlabel("Spanwise y  [m]")
-    ax.set_ylabel("Chordwise x  [m]  (LE at top)")
-    ax.set_title(f"Mesh: {nx}×{ny} nodes", fontsize=8)
-    # Invert y-axis: aeronautical convention has LE (smaller x) at the top.
-    # Do NOT force equal aspect — high-AR wings collapse chord variation to
-    # a pixel-width line when span >> chord.
-    ax.invert_yaxis()
+    ax.set_ylabel("Chordwise x  [m]")
+    # Get original mesh dimensions from snapshot (the mesh array is 2×ny for LE/TE only)
+    snap_nx, snap_ny = nx, ny
+    for surf_snap in mesh_data.get("mesh_snapshot", {}).values():
+        snap_nx = surf_snap.get("nx", nx)
+        snap_ny = surf_snap.get("ny", ny)
+        break
+    ax.set_title(f"Mesh: {snap_nx}×{snap_ny} nodes", fontsize=8)
+    # Standard math convention: LE (smaller x) at bottom, TE (larger x) at top.
+    ax.text(0.02, 0.02, "Half-span shown (symmetry)", transform=ax.transAxes,
+            fontsize=7, color="gray", va="bottom")
     ax.legend(fontsize=7, loc="upper left")
     ax.grid(True, alpha=0.3)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
@@ -554,13 +564,20 @@ def plot_opt_dv_evolution(run_id: str, optimization_history: dict, case_name: st
             means = [float(np.asarray(v).mean()) for v in history]
         except Exception:
             continue
+        # Normalize to initial value so mixed-unit DVs share one axis
+        initial_val = means[0] if means else 0.0
+        if abs(initial_val) > 1e-12:
+            means_norm = [m / initial_val for m in means]
+        else:
+            means_norm = [1.0] * len(means)
         label = dv_name
         if isinstance(history[0], list) and len(history[0]) > 1:
             label = f"{dv_name} (mean)"
-        ax.plot(iters, means, "-o", markersize=3, linewidth=1.5, label=label, color=color)
+        ax.plot(iters, means_norm, "-o", markersize=3, linewidth=1.5, label=label, color=color)
 
+    ax.axhline(1.0, color="gray", linewidth=0.8, linestyle="--", alpha=0.7)
     ax.set_xlabel("Optimizer iteration  [—]")
-    ax.set_ylabel("DV value  [various units]")
+    ax.set_ylabel("DV / DV_initial  [—]")
     ax.set_title(f"{len(dv_history)} design variable(s)", fontsize=8)
     ax.legend(fontsize=7, loc="best")
     ax.grid(True, alpha=0.3)
@@ -610,20 +627,39 @@ def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str 
         arr = np.asarray(v).ravel()
         return float(arr.mean())
 
-    init_vals = [_scalar_mean(initial[k]) if k in initial else float("nan") for k in all_dvs]
-    final_vals = [_scalar_mean(final[k]) if k in final else float("nan") for k in all_dvs]
+    dv_history = optimization_history.get("dv_history", {})
+
+    init_ratios = []
+    final_ratios = []
+    for k in all_dvs:
+        # Prefer dv_history for physical values when available
+        if k in dv_history and dv_history[k]:
+            hist = dv_history[k]
+            init_val = float(np.asarray(hist[0]).mean())
+            final_val = float(np.asarray(hist[-1]).mean())
+        else:
+            init_val = _scalar_mean(initial[k]) if k in initial else float("nan")
+            final_val = _scalar_mean(final[k]) if k in final else float("nan")
+        # Normalize: initial is always 1.0; final is ratio to initial
+        if abs(init_val) > 1e-12:
+            init_ratios.append(1.0)
+            final_ratios.append(final_val / init_val)
+        else:
+            init_ratios.append(1.0)
+            final_ratios.append(float("nan"))
 
     x = np.arange(len(all_dvs))
     width = 0.35
-    bars_i = ax.bar(x - width / 2, init_vals, width, label="Initial", color="steelblue",
+    bars_i = ax.bar(x - width / 2, init_ratios, width, label="Initial", color="steelblue",
                     edgecolor="navy", linewidth=0.8, alpha=0.85)
-    bars_f = ax.bar(x + width / 2, final_vals, width, label="Optimized", color="darkorange",
+    bars_f = ax.bar(x + width / 2, final_ratios, width, label="Optimized", color="darkorange",
                     edgecolor="saddlebrown", linewidth=0.8, alpha=0.85)
 
+    ax.axhline(1.0, color="gray", linewidth=0.8, linestyle="--", alpha=0.7)
     ax.set_xticks(x)
     ax.set_xticklabels(all_dvs, rotation=15, ha="right", fontsize=8)
-    ax.set_ylabel("DV value (mean)  [various units]")
-    ax.set_title("Mean DV value: initial vs optimized", fontsize=8)
+    ax.set_ylabel("DV / DV_initial  [—]")
+    ax.set_title("Mean DV ratio: initial vs optimized", fontsize=8)
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3, axis="y")
     fig.tight_layout(rect=[0, 0, 1, 0.93])

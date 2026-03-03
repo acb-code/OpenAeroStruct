@@ -194,13 +194,15 @@ def extract_standard_detail(
             vm_path = f"{perf}.vonmises"
             vm_val = _try_get(prob, vm_path)
             if vm_val is not None:
-                vm_arr = np.asarray(vm_val).ravel()
-                # Convert Pa → MPa; take max of upper/lower
-                if len(vm_arr) > 1:
-                    # OAS stores [n_elements × 2] (upper/lower) flattened
-                    n = len(vm_arr) // 2 if len(vm_arr) % 2 == 0 else len(vm_arr)
-                    vm_mpa = (vm_arr[:n] / 1e6).tolist()
-                    sect["vonmises_MPa"] = vm_mpa
+                vm_2d = np.asarray(vm_val)
+                # vonmises shape: (ny-1, 2) for tube, (ny-1, 4) for wingbox.
+                # Take max over the last dimension to get peak stress per element.
+                if vm_2d.ndim >= 2:
+                    vm_per_elem = vm_2d.max(axis=-1).ravel()
+                else:
+                    vm_per_elem = vm_2d.ravel()
+                if len(vm_per_elem) > 1:
+                    sect["vonmises_MPa"] = (vm_per_elem / 1e6).tolist()
 
             # Failure index distribution (per element)
             fi_path = f"{perf}.failure"
@@ -209,6 +211,14 @@ def extract_standard_detail(
                 fi_arr = np.asarray(fi_val).ravel()
                 if len(fi_arr) > 1:
                     sect["failure_index"] = fi_arr.tolist()
+                elif "vonmises_MPa" in sect:
+                    # FailureKS returns a scalar; derive per-element failure index
+                    # from vonmises: failure_i = vm / sigma_allow - 1
+                    yield_stress = surface.get("yield_stress", 500e6)
+                    safety_factor = surface.get("safety_factor", 2.5)
+                    sigma_allow = yield_stress / safety_factor
+                    vm_pa = np.array(sect["vonmises_MPa"]) * 1e6
+                    sect["failure_index"] = (vm_pa / sigma_allow - 1.0).tolist()
 
         standard["sectional_data"][name] = sect
 

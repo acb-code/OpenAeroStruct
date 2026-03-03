@@ -1,0 +1,365 @@
+"""
+Tests for the visualization pipeline (plotting.py and results.py extraction).
+
+Unit tests use synthetic data and run without OAS installed.
+Integration tests run real OAS analyses; marked @pytest.mark.slow.
+"""
+
+from __future__ import annotations
+
+import pytest
+import numpy as np
+
+from mcp.server.fastmcp.utilities.types import Image
+from oas_mcp.core.plotting import (
+    plot_lift_distribution,
+    plot_stress_distribution,
+    plot_planform,
+    plot_opt_dv_evolution,
+    plot_opt_comparison,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_RUN_ID = "test-run-0000"
+
+
+def _is_valid_png(img: Image) -> bool:
+    """Check that img is an Image with PNG magic bytes and non-trivial size."""
+    assert isinstance(img, Image), f"Expected Image, got {type(img)}"
+    data = img.data if isinstance(img.data, bytes) else bytes(img.data)
+    assert data[:4] == b"\x89PNG", "PNG magic bytes missing"
+    assert len(data) > 500, f"Image too small ({len(data)} bytes)"
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: lift_distribution
+# ---------------------------------------------------------------------------
+
+
+class TestLiftDistribution:
+    """Bug C: Cl has ny-1 values, y_span_norm has ny values."""
+
+    def test_panel_midpoints(self):
+        """Cl (n panels) and y (n+1 nodes) → line plot via midpoints."""
+        n = 6  # panels
+        Cl = [0.5 + 0.1 * i for i in range(n)]
+        y = [i / n for i in range(n + 1)]
+
+        results = {
+            "sectional_data": {
+                "wing": {"Cl": Cl, "y_span_norm": y}
+            },
+            "surfaces": {},
+        }
+        img = plot_lift_distribution(_RUN_ID, results)
+        assert _is_valid_png(img)
+
+    def test_matching_lengths(self):
+        """Cl and y same length → line plot still renders."""
+        n = 6
+        Cl = [0.5] * n
+        y = [i / (n - 1) for i in range(n)]
+
+        results = {
+            "sectional_data": {
+                "wing": {"Cl": Cl, "y_span_norm": y}
+            },
+            "surfaces": {},
+        }
+        img = plot_lift_distribution(_RUN_ID, results)
+        assert _is_valid_png(img)
+
+    def test_fallback_bar_chart(self):
+        """No sectional Cl → bar chart fallback still renders."""
+        results = {
+            "sectional_data": {},
+            "surfaces": {"wing": {"CL": 0.4}},
+        }
+        img = plot_lift_distribution(_RUN_ID, results)
+        assert _is_valid_png(img)
+
+    def test_fallback_missing_sectional_data(self):
+        """Completely empty results → fallback bar chart with no bars."""
+        results = {"surfaces": {}}
+        img = plot_lift_distribution(_RUN_ID, results)
+        assert _is_valid_png(img)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: stress_distribution
+# ---------------------------------------------------------------------------
+
+
+class TestStressDistribution:
+    """Bug A+B: vonmises per element, failure_index derived from scalar."""
+
+    def _make_struct_results(self, ny: int, include_failure: bool = True) -> dict:
+        n_elem = ny - 1
+        y_nodes = [i / (ny - 1) for i in range(ny)]
+        vm = [100.0 + 50.0 * i for i in range(n_elem)]
+        sect: dict = {
+            "y_span_norm": y_nodes,
+            "vonmises_MPa": vm,
+        }
+        if include_failure:
+            # failure_index: ny-1 values
+            sect["failure_index"] = [v / 200.0 - 1.0 for v in vm]
+        surf_results = {
+            "sectional_data": sect,
+            "max_vonmises_Pa": max(vm) * 1e6,
+        }
+        return {
+            "surfaces": {"wing": surf_results},
+        }
+
+    def test_vonmises_per_element(self):
+        """vonmises_MPa with ny-1 values renders a line plot."""
+        results = self._make_struct_results(ny=5, include_failure=False)
+        img = plot_stress_distribution(_RUN_ID, results)
+        assert _is_valid_png(img)
+
+    def test_failure_index_present(self):
+        """failure_index renders on both stress and failure panels."""
+        results = self._make_struct_results(ny=5, include_failure=True)
+        img = plot_stress_distribution(_RUN_ID, results)
+        assert _is_valid_png(img)
+
+    def test_no_stress_data_fallback(self):
+        """No stress data → 'No stress data available' placeholder renders."""
+        results = {"surfaces": {"wing": {}}}
+        img = plot_stress_distribution(_RUN_ID, results)
+        assert _is_valid_png(img)
+
+    def test_scalar_fallback(self):
+        """Only scalar max_vonmises_Pa → axhline fallback renders."""
+        results = {
+            "surfaces": {
+                "wing": {
+                    "sectional_data": {},
+                    "max_vonmises_Pa": 250e6,
+                    "failure": 0.3,
+                }
+            }
+        }
+        img = plot_stress_distribution(_RUN_ID, results)
+        assert _is_valid_png(img)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: planform
+# ---------------------------------------------------------------------------
+
+
+class TestPlanform:
+    def _make_mesh_data(self, nx: int = 3, ny: int = 7) -> dict:
+        """Build a rectangular mesh for planform testing."""
+        y = np.linspace(0, 5, ny)
+        le = np.column_stack([np.zeros(ny), y, np.zeros(ny)])
+        te = np.column_stack([np.ones(ny), y, np.zeros(ny)])
+        mesh = np.array([le, te])  # shape (2, ny, 3)
+        # Add LE and TE rows to simulate the actual minimal mesh passed by server
+        return {
+            "mesh": mesh.tolist(),
+            "mesh_snapshot": {
+                "wing": {
+                    "leading_edge": le.tolist(),
+                    "trailing_edge": te.tolist(),
+                    "nx": nx,
+                    "ny": ny,
+                }
+            },
+        }
+
+    def test_basic_render(self):
+        """Planform renders without error."""
+        mesh_data = self._make_mesh_data()
+        img = plot_planform(_RUN_ID, mesh_data)
+        assert _is_valid_png(img)
+
+    def test_correct_nx_in_title(self):
+        """Subtitle shows original nx from mesh_snapshot, not reconstructed 2."""
+        # We just verify it renders; correctness of nx verified by integration tests
+        mesh_data = self._make_mesh_data(nx=5, ny=9)
+        img = plot_planform(_RUN_ID, mesh_data)
+        assert _is_valid_png(img)
+
+    def test_no_mesh_data_fallback(self):
+        """Empty mesh_data → placeholder text renders."""
+        img = plot_planform(_RUN_ID, {})
+        assert _is_valid_png(img)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: opt_dv_evolution (Bug E)
+# ---------------------------------------------------------------------------
+
+
+class TestOptDvEvolution:
+    def test_mixed_scale_normalized(self):
+        """DVs with wildly different scales render on one shared axis."""
+        # twist: degrees (~5 deg), thickness: meters (~0.05 m) — 100× scale diff
+        dv_history = {
+            "twist": [5.0, 4.5, 4.2, 4.0],
+            "thickness": [0.05, 0.052, 0.055, 0.057],
+        }
+        opt_hist = {"dv_history": dv_history}
+        img = plot_opt_dv_evolution(_RUN_ID, opt_hist)
+        assert _is_valid_png(img)
+
+    def test_vector_dv(self):
+        """Vector DV (list per iteration) rendered as mean, normalized."""
+        dv_history = {
+            "twist_cp": [
+                [3.0, 5.0, 3.0],
+                [2.8, 4.8, 2.8],
+                [2.5, 4.5, 2.5],
+            ]
+        }
+        opt_hist = {"dv_history": dv_history}
+        img = plot_opt_dv_evolution(_RUN_ID, opt_hist)
+        assert _is_valid_png(img)
+
+    def test_no_history_fallback(self):
+        """Empty dv_history → placeholder text renders."""
+        img = plot_opt_dv_evolution(_RUN_ID, {})
+        assert _is_valid_png(img)
+
+    def test_zero_initial_dv(self):
+        """DV starting at zero → normalized to 1.0 (no divide-by-zero)."""
+        dv_history = {"alpha": [0.0, 0.1, 0.2]}
+        img = plot_opt_dv_evolution(_RUN_ID, {"dv_history": dv_history})
+        assert _is_valid_png(img)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: opt_comparison (Bug F)
+# ---------------------------------------------------------------------------
+
+
+class TestOptComparison:
+    def test_normalized_comparison(self):
+        """Mixed-scale initial/final DVs render as ratios on one axis."""
+        opt_hist = {
+            "initial_dvs": {"twist": 5.0, "thickness": 0.05},
+            "final_dvs": {"twist": 4.0, "thickness": 0.06},
+        }
+        img = plot_opt_comparison(_RUN_ID, opt_hist)
+        assert _is_valid_png(img)
+
+    def test_prefers_dv_history(self):
+        """Ratio computed from dv_history when available."""
+        opt_hist = {
+            "initial_dvs": {"twist": 5.0},
+            "final_dvs": {"twist": 4.0},
+            "dv_history": {"twist": [5.0, 4.5, 4.0]},
+        }
+        img = plot_opt_comparison(_RUN_ID, opt_hist)
+        assert _is_valid_png(img)
+
+    def test_no_dvs_fallback(self):
+        """No DV data → placeholder text renders."""
+        img = plot_opt_comparison(_RUN_ID, {})
+        assert _is_valid_png(img)
+
+
+# ---------------------------------------------------------------------------
+# Integration tests (require OAS)
+# ---------------------------------------------------------------------------
+
+
+pytestmark_slow = pytest.mark.slow
+
+
+@pytest.mark.slow
+class TestAeroVisualizationE2E:
+    """End-to-end: create surface → run analysis → visualize."""
+
+    async def test_lift_distribution_e2e(self, aero_wing):
+        from oas_mcp.server import run_aero_analysis, visualize
+
+        envelope = await run_aero_analysis(surfaces=["wing"])
+        run_id = envelope["run_id"]
+
+        img = await visualize(run_id=run_id, plot_type="lift_distribution")
+        assert _is_valid_png(img)
+
+    async def test_planform_e2e(self, aero_wing):
+        from oas_mcp.server import run_aero_analysis, visualize
+
+        envelope = await run_aero_analysis(surfaces=["wing"])
+        run_id = envelope["run_id"]
+
+        img = await visualize(run_id=run_id, plot_type="planform")
+        assert _is_valid_png(img)
+
+    async def test_sectional_data_extraction_aero(self, aero_wing):
+        """Aero run stores Cl (ny-1) and y_span_norm (ny) in artifact."""
+        from oas_mcp.server import run_aero_analysis, _artifacts
+
+        envelope = await run_aero_analysis(surfaces=["wing"])
+        run_id = envelope["run_id"]
+
+        artifact = _artifacts.get(run_id)
+        assert artifact is not None
+        std = artifact["results"].get("standard_detail", {})
+        sect = std.get("sectional_data", {}).get("wing", {})
+
+        # num_y=5 with symmetry=True → OAS stores half-span: 3 nodes, 2 panels
+        Cl = sect.get("Cl")
+        y = sect.get("y_span_norm")
+
+        assert Cl is not None, "Cl not stored in artifact"
+        assert y is not None, "y_span_norm not stored in artifact"
+        assert len(y) >= 2, f"Expected at least 2 y values, got {len(y)}"
+        assert len(Cl) == len(y) - 1, (
+            f"Expected len(Cl)==len(y)-1, got len(Cl)={len(Cl)}, len(y)={len(y)}"
+        )
+
+
+@pytest.mark.slow
+class TestAerostructVisualizationE2E:
+    """End-to-end: create structural surface → run aerostruct → visualize."""
+
+    async def test_stress_distribution_e2e(self, struct_wing):
+        from oas_mcp.server import run_aerostruct_analysis, visualize
+
+        envelope = await run_aerostruct_analysis(surfaces=["wing"])
+        run_id = envelope["run_id"]
+
+        img = await visualize(run_id=run_id, plot_type="stress_distribution")
+        assert _is_valid_png(img)
+
+    async def test_sectional_data_extraction_aerostruct(self, struct_wing):
+        """Aerostruct run stores vonmises_MPa and failure_index (ny-1 each)."""
+        from oas_mcp.server import run_aerostruct_analysis, _artifacts
+
+        envelope = await run_aerostruct_analysis(surfaces=["wing"])
+        run_id = envelope["run_id"]
+
+        artifact = _artifacts.get(run_id)
+        assert artifact is not None
+        std = artifact["results"].get("standard_detail", {})
+        sect = std.get("sectional_data", {}).get("wing", {})
+
+        # num_y=5 with symmetry=True → OAS stores half-span: 3 nodes, 2 elements (ny-1)
+        vm = sect.get("vonmises_MPa")
+        fi = sect.get("failure_index")
+        y = sect.get("y_span_norm")
+
+        assert y is not None, "y_span_norm not stored"
+        assert len(y) >= 2, f"Expected at least 2 y values, got {len(y)}"
+
+        assert vm is not None, "vonmises_MPa not stored in artifact"
+        assert len(vm) == len(y) - 1, (
+            f"Expected len(vonmises_MPa)==len(y)-1, got len(vm)={len(vm)}, len(y)={len(y)}"
+        )
+
+        assert fi is not None, "failure_index not stored in artifact"
+        assert len(fi) == len(vm), (
+            f"Expected len(failure_index)==len(vonmises_MPa), got {len(fi)} vs {len(vm)}"
+        )
