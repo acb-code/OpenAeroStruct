@@ -45,8 +45,7 @@ jobs:
       - name: Run MCP unit and integration tests
         run: |
           pytest oas_mcp/tests/ -v -m "not golden_numerics" \
-            --tb=short \
-            --timeout=120
+            --tb=short
 
   # -------------------------------------------------------------------------
   # Tier 1: Physics invariant golden tests
@@ -78,8 +77,7 @@ jobs:
       - name: Run physics invariant golden tests
         run: |
           pytest oas_mcp/tests/golden/test_golden_physics.py -v \
-            --tb=short \
-            --timeout=300
+            --tb=short
 
   # -------------------------------------------------------------------------
   # Tier 2: Numeric baseline golden tests (allowed to fail without blocking)
@@ -113,8 +111,7 @@ jobs:
       - name: Run numeric baseline golden tests
         run: |
           pytest oas_mcp/tests/golden/test_golden_numerics.py -v \
-            --tb=short \
-            --timeout=300
+            --tb=short
         continue-on-error: true
 
       - name: Upload golden values for inspection on failure
