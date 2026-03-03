@@ -135,6 +135,16 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "") -> d
     Cl = sectional.get("Cl")
     y = sectional.get("y_span_norm")
 
+    # sectional_data is stored keyed by surface name: {"wing": {"Cl": [...], ...}}.
+    # Fall through the nested dict to find the first surface with both arrays.
+    if (Cl is None or y is None) and sectional:
+        for surf_data in sectional.values():
+            if isinstance(surf_data, dict):
+                Cl = surf_data.get("Cl")
+                y = surf_data.get("y_span_norm")
+                if Cl and y:
+                    break
+
     if Cl and y and len(Cl) == len(y):
         ax.plot(y, Cl, "b-o", markersize=3, linewidth=1.5)
         ax.set_xlabel("Normalised spanwise station η = 2y/b  [—]")
