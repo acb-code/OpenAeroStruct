@@ -28,7 +28,7 @@ src/adjoint/tempForward/
 openaerostruct.egg-info/
 .vscode
 *.plt
-oas_data/artifacts/
+oas_data/**
 !oas_data/.keep
 *.env
 *.env.local

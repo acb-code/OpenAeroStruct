@@ -84,6 +84,9 @@ class Session:
     # name → surface dict (includes mesh as numpy array)
     surfaces: dict[str, dict] = field(default_factory=dict)
 
+    # Project name for organising artifacts (configurable per session)
+    project: str = "default"
+
     # Cached problems: key = analysis_type + ":" + sorted surface names
     _cache: dict[str, _CachedProblem] = field(default_factory=dict, repr=False)
 
@@ -218,7 +221,7 @@ class Session:
         """Update session defaults from keyword arguments."""
         valid_fields = {
             "default_detail_level", "validation_severity_threshold",
-            "auto_visualize", "telemetry_mode",
+            "auto_visualize", "telemetry_mode", "project",
         }
         for key, value in kwargs.items():
             if key not in valid_fields:
@@ -226,7 +229,10 @@ class Session:
                     f"Unknown session default {key!r}. "
                     f"Valid keys: {sorted(valid_fields)}"
                 )
-            setattr(self.defaults, key, value)
+            if key == "project":
+                self.project = value
+            else:
+                setattr(self.defaults, key, value)
 
     # ------------------------------------------------------------------
     # Requirements
@@ -250,6 +256,7 @@ class Session:
         self._mesh_snapshots.clear()
         self.defaults = SessionDefaults()
         self.requirements = []
+        self.project = "default"
 
 
 class SessionManager:

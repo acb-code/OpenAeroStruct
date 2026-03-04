@@ -20,8 +20,16 @@ Usage in server.py (HTTP mode only)::
 
 from __future__ import annotations
 
+import contextvars
+import getpass
 import os
 from typing import Any
+
+# Contextvar that holds the authenticated username for the current async request.
+# Set by KeycloakTokenVerifier.verify_token() on each successful JWT validation.
+_current_user_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_current_user_ctx", default=""
+)
 
 KEYCLOAK_ISSUER_URL: str = os.environ.get("KEYCLOAK_ISSUER_URL", "")
 KEYCLOAK_CLIENT_ID: str = os.environ.get("KEYCLOAK_CLIENT_ID", "oas-mcp")
@@ -104,12 +112,33 @@ class KeycloakTokenVerifier:
         except Exception:
             return None
 
+        # Store the username in the contextvar so get_current_user() can read it
+        # within the same async request lifecycle.
+        username = claims.get("preferred_username") or claims.get("sub", "")
+        _current_user_ctx.set(username)
+
         return AccessToken(
             token=token,
             client_id=claims.get("azp") or claims.get("client_id", self._client_id),
             scopes=claims.get("scope", "").split(),
             expires_at=claims.get("exp"),
         )
+
+
+def get_current_user() -> str:
+    """Return the authenticated username for the current request.
+
+    In HTTP mode with Keycloak, this reads the username stored by
+    ``KeycloakTokenVerifier.verify_token()`` via a contextvar.
+
+    Falls back to the ``OAS_USER`` environment variable, then to the
+    OS login name (``getpass.getuser()``).  The stdio transport always
+    uses the fallback since there is no JWT.
+    """
+    user = _current_user_ctx.get()
+    if user:
+        return user
+    return os.environ.get("OAS_USER") or getpass.getuser()
 
 
 def build_auth_settings() -> Any:

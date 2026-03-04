@@ -61,8 +61,8 @@ from .core.validation import (
     validate_optimization,
     validate_stability,
 )
-from .core.artifacts import ArtifactStore
-from .core.auth import build_auth_settings, build_token_verifier
+from .core.artifacts import ArtifactStore, _make_run_id
+from .core.auth import build_auth_settings, build_token_verifier, get_current_user
 from .core.session import SessionManager
 from .core.validators import (
     validate_fem_model_type,
@@ -139,7 +139,11 @@ PERFORMANCE:
 
 ARTIFACT STORAGE (every analysis is automatically saved):
   • Each analysis tool returns a run_id — use it to retrieve results later.
-  • list_artifacts(session_id?, analysis_type?) — browse saved runs
+  • Storage hierarchy: {OAS_DATA_DIR}/{user}/{project}/{session_id}/{run_id}.json
+  • OAS_USER env var sets user identity (default: OS login name)
+  • OAS_PROJECT env var sets default project (default: "default")
+  • Pass run_name="my label" to any analysis tool to tag a run
+  • list_artifacts(session_id?, analysis_type?, user?, project?) — browse saved runs
   • get_artifact(run_id) — full metadata + results for a past run
   • get_artifact_summary(run_id) — metadata only (lightweight)
   • delete_artifact(run_id) — remove a saved artifact
@@ -413,6 +417,7 @@ async def run_aero_analysis(
     density: Annotated[float, "Air density in kg/m^3"] = 0.38,
     cg: Annotated[list[float] | None, "Centre of gravity [x, y, z] in metres"] = None,
     session_id: Annotated[str, "Session identifier"] = "default",
+    run_name: Annotated[str | None, "Optional label for this run (stored in artifact metadata)"] = None,
 ) -> dict:
     """Run a single-point VLM aerodynamic analysis.
 
@@ -427,6 +432,7 @@ async def run_aero_analysis(
     validate_surface_names_exist(surfaces, session)
 
     surface_dicts = session.get_surfaces(surfaces)
+    run_id = _make_run_id()
 
     def _run():
         cached = session.get_cached_problem(surfaces, "aero")
@@ -459,20 +465,13 @@ async def run_aero_analysis(
     cache_hit = session.get_cached_problem(surfaces, "aero") is not None
     results, standard_detail = await asyncio.to_thread(_suppress_output, _run)
 
+    # Store mesh snapshot in session for live retrieval
+    session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
+
     inputs = {
         "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
         "reynolds_number": reynolds_number, "density": density,
     }
-    run_id = _artifacts.save(
-        session_id=session_id,
-        analysis_type="aero",
-        tool_name="run_aero_analysis",
-        surfaces=surfaces,
-        parameters=inputs,
-        results={**results, "standard_detail": standard_detail},
-    )
-    # Store standard detail and mesh snapshot in session for later retrieval
-    session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
 
     findings = validate_aero(results, context={"alpha": alpha})
     if session.requirements:
@@ -497,6 +496,25 @@ async def run_aero_analysis(
         if m is not None:
             mesh_shape = tuple(m.shape)
     telem = make_telemetry(elapsed, cache_hit, len(surfaces), mesh_shape)
+
+    results_to_save = {**results, "standard_detail": standard_detail}
+    conv_data = session.get_convergence(run_id)
+    if conv_data:
+        results_to_save["convergence"] = conv_data
+    _artifacts.save(
+        session_id=session_id,
+        analysis_type="aero",
+        tool_name="run_aero_analysis",
+        surfaces=surfaces,
+        parameters=inputs,
+        results=results_to_save,
+        user=get_current_user(),
+        project=session.project,
+        name=run_name,
+        validation=validation,
+        telemetry=telem,
+        run_id=run_id,
+    )
 
     envelope = make_envelope("run_aero_analysis", run_id, inputs, results, validation, telem)
     await _apply_auto_plots(envelope, session, run_id, results, standard_detail)
@@ -523,6 +541,7 @@ async def run_aerostruct_analysis(
     load_factor: Annotated[float, "Load factor (1.0 = 1-g cruise)"] = 1.0,
     empty_cg: Annotated[list[float] | None, "Empty CG location [x, y, z] in metres"] = None,
     session_id: Annotated[str, "Session identifier"] = "default",
+    run_name: Annotated[str | None, "Optional label for this run (stored in artifact metadata)"] = None,
 ) -> dict:
     """Run a coupled aerostructural analysis (VLM + beam FEM).
 
@@ -539,6 +558,7 @@ async def run_aerostruct_analysis(
     surface_dicts = session.get_surfaces(surfaces)
     for s in surface_dicts:
         validate_struct_props_present(s)
+    run_id = _make_run_id()
 
     from openaerostruct.utils.constants import grav_constant
     ct_val = CT if CT is not None else grav_constant * 17.0e-6
@@ -584,20 +604,13 @@ async def run_aerostruct_analysis(
     cache_hit = session.get_cached_problem(surfaces, "aerostruct") is not None
     results, standard_detail = await asyncio.to_thread(_suppress_output, _run)
 
+    session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
+
     inputs = {
         "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
         "reynolds_number": reynolds_number, "density": density,
         "W0": W0, "R": R, "speed_of_sound": speed_of_sound, "load_factor": load_factor,
     }
-    run_id = _artifacts.save(
-        session_id=session_id,
-        analysis_type="aerostruct",
-        tool_name="run_aerostruct_analysis",
-        surfaces=surfaces,
-        parameters=inputs,
-        results={**results, "standard_detail": standard_detail},
-    )
-    session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
 
     findings = validate_aerostruct(results, context={"alpha": alpha, "W0": W0})
     if session.requirements:
@@ -623,6 +636,25 @@ async def run_aerostruct_analysis(
             mesh_shape = tuple(m.shape)
     telem = make_telemetry(elapsed, cache_hit, len(surfaces), mesh_shape)
 
+    results_to_save = {**results, "standard_detail": standard_detail}
+    conv_data = session.get_convergence(run_id)
+    if conv_data:
+        results_to_save["convergence"] = conv_data
+    _artifacts.save(
+        session_id=session_id,
+        analysis_type="aerostruct",
+        tool_name="run_aerostruct_analysis",
+        surfaces=surfaces,
+        parameters=inputs,
+        results=results_to_save,
+        user=get_current_user(),
+        project=session.project,
+        name=run_name,
+        validation=validation,
+        telemetry=telem,
+        run_id=run_id,
+    )
+
     envelope = make_envelope("run_aerostruct_analysis", run_id, inputs, results, validation, telem)
     await _apply_auto_plots(envelope, session, run_id, results, standard_detail)
     return envelope
@@ -645,6 +677,7 @@ async def compute_drag_polar(
     density: Annotated[float, "Air density in kg/m^3"] = 0.38,
     cg: Annotated[list[float] | None, "Centre of gravity [x, y, z] in metres"] = None,
     session_id: Annotated[str, "Session identifier"] = "default",
+    run_name: Annotated[str | None, "Optional label for this run (stored in artifact metadata)"] = None,
 ) -> dict:
     """Compute a drag polar by sweeping angle of attack.
 
@@ -685,6 +718,7 @@ async def compute_drag_polar(
 
         return CLs, CDs, CMs
 
+    run_id = _make_run_id()
     t0 = time.perf_counter()
     CLs, CDs, CMs = await asyncio.to_thread(_suppress_output, _run)
 
@@ -710,19 +744,26 @@ async def compute_drag_polar(
         "velocity": velocity, "Mach_number": Mach_number,
         "reynolds_number": reynolds_number, "density": density,
     }
-    run_id = _artifacts.save(
+
+    findings = validate_drag_polar(polar_results, context={"alpha_start": alpha_start})
+    validation = findings_to_dict(findings)
+    elapsed = time.perf_counter() - t0
+    telem = make_telemetry(elapsed, False, len(surfaces))
+
+    _artifacts.save(
         session_id=session_id,
         analysis_type="drag_polar",
         tool_name="compute_drag_polar",
         surfaces=surfaces,
         parameters=inputs,
         results=polar_results,
+        user=get_current_user(),
+        project=session.project,
+        name=run_name,
+        validation=validation,
+        telemetry=telem,
+        run_id=run_id,
     )
-
-    findings = validate_drag_polar(polar_results, context={"alpha_start": alpha_start})
-    validation = findings_to_dict(findings)
-    elapsed = time.perf_counter() - t0
-    telem = make_telemetry(elapsed, False, len(surfaces))
 
     envelope = make_envelope("compute_drag_polar", run_id, inputs, polar_results, validation, telem)
     await _apply_auto_plots(envelope, session, run_id, polar_results)
@@ -744,6 +785,7 @@ async def compute_stability_derivatives(
     density: Annotated[float, "Air density in kg/m^3"] = 0.38,
     cg: Annotated[list[float] | None, "Centre of gravity [x, y, z] in metres — affects CM and static margin"] = None,
     session_id: Annotated[str, "Session identifier"] = "default",
+    run_name: Annotated[str | None, "Optional label for this run (stored in artifact metadata)"] = None,
 ) -> dict:
     """Compute stability derivatives: CL_alpha, CM_alpha, and static margin.
 
@@ -848,25 +890,33 @@ async def compute_stability_derivatives(
         prob.run_model()
         return extract_stability_results(prob)
 
+    run_id = _make_run_id()
     t0 = time.perf_counter()
     results = await asyncio.to_thread(_suppress_output, _run)
     inputs = {
         "alpha": alpha, "velocity": velocity, "Mach_number": Mach_number,
         "reynolds_number": reynolds_number, "density": density,
     }
-    run_id = _artifacts.save(
+
+    findings = validate_stability(results, context={"alpha": alpha})
+    validation = findings_to_dict(findings)
+    elapsed = time.perf_counter() - t0
+    telem = make_telemetry(elapsed, False, len(surfaces))
+
+    _artifacts.save(
         session_id=session_id,
         analysis_type="stability",
         tool_name="compute_stability_derivatives",
         surfaces=surfaces,
         parameters=inputs,
         results=results,
+        user=get_current_user(),
+        project=session.project,
+        name=run_name,
+        validation=validation,
+        telemetry=telem,
+        run_id=run_id,
     )
-
-    findings = validate_stability(results, context={"alpha": alpha})
-    validation = findings_to_dict(findings)
-    elapsed = time.perf_counter() - t0
-    telem = make_telemetry(elapsed, False, len(surfaces))
 
     return make_envelope("compute_stability_derivatives", run_id, inputs, results, validation, telem)
 
@@ -900,6 +950,7 @@ async def run_optimization(
     tolerance: Annotated[float, "Optimiser convergence tolerance"] = 1e-6,
     max_iterations: Annotated[int, "Maximum optimiser iterations"] = 200,
     session_id: Annotated[str, "Session identifier"] = "default",
+    run_name: Annotated[str | None, "Optional label for this run (stored in artifact metadata)"] = None,
 ) -> dict:
     """Run a design optimisation.
 
@@ -1022,27 +1073,41 @@ async def run_optimization(
         }
         return result, standard
 
+    run_id = _make_run_id()
     t0 = time.perf_counter()
     result, standard_detail = await asyncio.to_thread(_suppress_output, _run)
+
+    session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
+
     inputs = {
         "analysis_type": analysis_type, "objective": objective,
         "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
         "density": density,
     }
-    run_id = _artifacts.save(
-        session_id=session_id,
-        analysis_type="optimization",
-        tool_name="run_optimization",
-        surfaces=surfaces,
-        parameters=inputs,
-        results={**result, "standard_detail": standard_detail},
-    )
-    session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
 
     findings = validate_optimization(result, context={"analysis_type": analysis_type})
     validation = findings_to_dict(findings)
     elapsed = time.perf_counter() - t0
     telem = make_telemetry(elapsed, False, len(surfaces))
+
+    results_to_save = {**result, "standard_detail": standard_detail}
+    conv_data = session.get_convergence(run_id)
+    if conv_data:
+        results_to_save["convergence"] = conv_data
+    _artifacts.save(
+        session_id=session_id,
+        analysis_type="optimization",
+        tool_name="run_optimization",
+        surfaces=surfaces,
+        parameters=inputs,
+        results=results_to_save,
+        user=get_current_user(),
+        project=session.project,
+        name=run_name,
+        validation=validation,
+        telemetry=telem,
+        run_id=run_id,
+    )
 
     return make_envelope("run_optimization", run_id, inputs, result, validation, telem)
 
@@ -1082,6 +1147,8 @@ async def list_artifacts(
         str | None,
         "Filter by type: 'aero', 'aerostruct', 'drag_polar', 'stability', 'optimization'",
     ] = None,
+    user: Annotated[str | None, "Filter by user identity (default: all users)"] = None,
+    project: Annotated[str | None, "Filter by project name (default: all projects)"] = None,
 ) -> dict:
     """List saved analysis artifacts with optional filters.
 
@@ -1089,7 +1156,7 @@ async def list_artifacts(
     analysis_type, timestamp, surfaces, tool_name).  Does not load the
     full results payload — use get_artifact for that.
     """
-    entries = await asyncio.to_thread(_artifacts.list, session_id, analysis_type)
+    entries = await asyncio.to_thread(_artifacts.list, session_id, analysis_type, user, project)
     return {"count": len(entries), "artifacts": entries}
 
 
@@ -1190,6 +1257,8 @@ async def get_run(
         if has_mesh or has_standard:
             available_plots.append("planform")
     conv = session.get_convergence(run_id)
+    if not conv:
+        conv = results.get("convergence") or artifact.get("convergence")
     if conv:
         available_plots.append("convergence")
 
@@ -1198,11 +1267,14 @@ async def get_run(
         "tool_name": meta.get("tool_name"),
         "analysis_type": analysis_type,
         "timestamp": meta.get("timestamp"),
+        "user": meta.get("user"),
+        "project": meta.get("project"),
+        "name": meta.get("name"),
         "surfaces": surface_names,
         "inputs": meta.get("parameters", {}),
         "outputs_summary": {
             k: v for k, v in results.items()
-            if k not in ("standard_detail",) and not isinstance(v, (list, dict))
+            if k not in ("standard_detail", "convergence") and not isinstance(v, (list, dict))
         },
         "cache_state": cache_info,
         "detail_levels_available": {
@@ -1371,7 +1443,9 @@ async def visualize(
             mesh_data["mesh"] = np.array([le, te]).tolist()
         break
 
-    conv_data = session.get_convergence(run_id) or {}
+    conv_data = session.get_convergence(run_id)
+    if not conv_data:
+        conv_data = results.get("convergence") or artifact.get("convergence") or {}
 
     # Inject sectional_data into results for lift_distribution / stress plots
     if standard.get("sectional_data"):
@@ -1447,6 +1521,10 @@ async def configure_session(
         "Operators: ==, !=, <, <=, >, >=. "
         "Example: [{\"path\": \"CL\", \"operator\": \">=\", \"value\": 0.4, \"label\": \"min_CL\"}]",
     ] = None,
+    project: Annotated[
+        str | None,
+        "Project name for organising artifacts under {OAS_DATA_DIR}/{user}/{project}/",
+    ] = None,
 ) -> dict:
     """Configure per-session defaults to reduce repeated arguments.
 
@@ -1495,6 +1573,9 @@ async def configure_session(
             raise ValueError("telemetry_mode must be 'off', 'logging', or 'otel'")
         updates["telemetry_mode"] = telemetry_mode
 
+    if project is not None:
+        updates["project"] = project
+
     if updates:
         session.configure(**updates)
 
@@ -1503,6 +1584,7 @@ async def configure_session(
 
     return {
         "session_id": session_id,
+        "project": session.project,
         "status": "configured",
         "current_defaults": session.defaults.to_dict(),
         "requirements_count": len(session.requirements),
@@ -1612,12 +1694,16 @@ _REFERENCE = """\
 
 ## Artifact storage (automatic)
   Every analysis tool saves a run_id.  Use it to retrieve results later.
-  list_artifacts(session_id?, analysis_type?)   list saved runs (index only)
+  Storage layout: {OAS_DATA_DIR}/{user}/{project}/{session_id}/{run_id}.json
+  OAS_DATA_DIR env var controls storage root (default: ./oas_data/)
+  OAS_USER env var sets user identity (default: OS login name)
+  OAS_PROJECT env var sets default project per session (default: "default")
+  Pass run_name="label" to tag a run; visible in list_artifacts output.
+  list_artifacts(session_id?, analysis_type?, user?, project?)  list saved runs
   get_artifact(run_id, session_id?)             full metadata + results
   get_artifact_summary(run_id, session_id?)     metadata only (no payload)
   delete_artifact(run_id, session_id?)          remove permanently
   oas://artifacts/{run_id}                      resource access by run_id
-  OAS_DATA_DIR env var controls storage root    (default: ./oas_data/artifacts/)
 
 ## Common errors and fixes
   "num_y must be odd"           → change num_y to nearest odd number

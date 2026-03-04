@@ -14,8 +14,8 @@ COPY . .
 # Install the package with MCP + HTTP transport dependencies (uvicorn, PyJWT, httpx)
 RUN pip install --no-cache-dir ".[http]"
 
-# Artifact storage location inside the container
-ENV OAS_DATA_DIR=/data/artifacts
+# Artifact storage root inside the container (bind-mounted from host ./oas_data)
+ENV OAS_DATA_DIR=/data
 
 # Default transport — override with OAS_TRANSPORT=http for streamable HTTP
 ENV OAS_TRANSPORT=stdio

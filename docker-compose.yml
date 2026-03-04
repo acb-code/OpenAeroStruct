@@ -4,7 +4,10 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - oas-data:/data
+      # Bind-mount ./oas_data on the host into the container.
+      # Docker creates the directory automatically if it doesn't exist.
+      # Data persists after the container stops and is easy to inspect/backup.
+      - ./oas_data:/data
     # Load secrets from .env (copy from .env.example and fill in values).
     # Variables set in the environment: block below override whatever is in .env.
     env_file:
@@ -12,10 +15,7 @@ services:
         required: false
     environment:
       # Docker-specific overrides — always use HTTP, bind to all interfaces,
-      # and store artifacts in the named volume.
+      # and store artifacts in the bind-mounted host directory.
       OAS_TRANSPORT: http
       OAS_HOST: 0.0.0.0
-      OAS_DATA_DIR: /data/artifacts
-
-volumes:
-  oas-data:
+      OAS_DATA_DIR: /data

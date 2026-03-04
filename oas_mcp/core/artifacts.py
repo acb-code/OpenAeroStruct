@@ -1,9 +1,9 @@
 """Filesystem-backed, thread-safe artifact store for the OAS MCP Server.
 
-Each analysis run is saved as a single JSON file:
+Each analysis run is saved as a single JSON file::
 
-    $OAS_DATA_DIR/{session_id}/{run_id}.json   — metadata + results
-    $OAS_DATA_DIR/{session_id}/index.json      — [{run_id, analysis_type, …}, …]
+    $OAS_DATA_DIR/{user}/{project}/{session_id}/{run_id}.json  — metadata + results
+    $OAS_DATA_DIR/{user}/{project}/{session_id}/index.json     — [{run_id, …}, …]
 
 Run IDs are formatted as ``YYYYMMDDTHHMMSS_{4hex}`` — human-readable,
 chronologically sortable, and collision-resistant.
@@ -26,7 +26,7 @@ import numpy as np
 
 
 def _default_data_dir() -> Path:
-    return Path(os.environ.get("OAS_DATA_DIR", "./oas_data/artifacts"))
+    return Path(os.environ.get("OAS_DATA_DIR", "./oas_data"))
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -58,7 +58,12 @@ class ArtifactStore:
     ----------
     data_dir:
         Root directory for artifacts.  Falls back to the ``OAS_DATA_DIR``
-        environment variable, or ``./oas_data/artifacts/`` if that is unset.
+        environment variable, or ``./oas_data/`` if that is unset.
+
+    Storage layout::
+
+        {data_dir}/{user}/{project}/{session_id}/{run_id}.json
+        {data_dir}/{user}/{project}/{session_id}/index.json
     """
 
     def __init__(self, data_dir: Path | str | None = None) -> None:
@@ -69,28 +74,30 @@ class ArtifactStore:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _session_dir(self, session_id: str) -> Path:
-        return self._data_dir / session_id
+    def _session_dir(self, user: str, project: str, session_id: str) -> Path:
+        return self._data_dir / user / project / session_id
 
-    def _artifact_path(self, session_id: str, run_id: str) -> Path:
-        return self._session_dir(session_id) / f"{run_id}.json"
+    def _artifact_path(self, user: str, project: str, session_id: str, run_id: str) -> Path:
+        return self._session_dir(user, project, session_id) / f"{run_id}.json"
 
-    def _index_path(self, session_id: str) -> Path:
-        return self._session_dir(session_id) / "index.json"
+    def _index_path(self, user: str, project: str, session_id: str) -> Path:
+        return self._session_dir(user, project, session_id) / "index.json"
 
-    def _load_index(self, session_id: str) -> list[dict]:
+    def _load_index(self, user: str, project: str, session_id: str) -> list[dict]:
         """Load the index for *session_id*, rebuilding if missing or corrupt."""
-        index_path = self._index_path(session_id)
+        index_path = self._index_path(user, project, session_id)
         if not index_path.exists():
-            return self._rebuild_index(session_id)
+            return self._rebuild_index(user, project, session_id)
         try:
             with index_path.open() as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
-            return self._rebuild_index(session_id)
+            return self._rebuild_index(user, project, session_id)
 
-    def _save_index(self, session_id: str, index: list[dict]) -> None:
-        index_path = self._index_path(session_id)
+    def _save_index(
+        self, user: str, project: str, session_id: str, index: list[dict]
+    ) -> None:
+        index_path = self._index_path(user, project, session_id)
         index_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = index_path.with_suffix(".tmp")
         try:
@@ -101,10 +108,11 @@ class ArtifactStore:
             tmp.unlink(missing_ok=True)
             raise
 
-    def _rebuild_index(self, session_id: str) -> list[dict]:
+    def _rebuild_index(self, user: str, project: str, session_id: str) -> list[dict]:
         """Reconstruct the index by scanning artifact files on disk."""
-        session_dir = self._session_dir(session_id)
+        session_dir = self._session_dir(user, project, session_id)
         index: list[dict] = []
+        seen_run_ids: set[str] = set()
         if session_dir.exists():
             for path in sorted(session_dir.glob("*.json")):
                 if path.name == "index.json":
@@ -113,18 +121,53 @@ class ArtifactStore:
                     with path.open() as f:
                         artifact = json.load(f)
                     meta = artifact.get("metadata", {})
-                    index.append({
-                        "run_id": meta.get("run_id", path.stem),
+                    rid = meta.get("run_id", path.stem)
+                    if rid in seen_run_ids:
+                        continue
+                    seen_run_ids.add(rid)
+                    entry: dict[str, Any] = {
+                        "run_id": rid,
                         "session_id": meta.get("session_id", session_id),
+                        "user": meta.get("user", user),
+                        "project": meta.get("project", project),
                         "analysis_type": meta.get("analysis_type", "unknown"),
                         "timestamp": meta.get("timestamp", ""),
                         "surfaces": meta.get("surfaces", []),
                         "tool_name": meta.get("tool_name", ""),
-                    })
+                    }
+                    if meta.get("name") is not None:
+                        entry["name"] = meta["name"]
+                    index.append(entry)
                 except (json.JSONDecodeError, OSError):
                     continue
-        self._save_index(session_id, index)
+        self._save_index(user, project, session_id, index)
         return index
+
+    def _iter_session_triples(
+        self,
+        user_filter: str | None = None,
+        project_filter: str | None = None,
+        session_filter: str | None = None,
+    ):
+        """Yield (user, project, session_id) tuples matching the given filters."""
+        if not self._data_dir.exists():
+            return
+        for user_dir in sorted(self._data_dir.iterdir()):
+            if not user_dir.is_dir():
+                continue
+            if user_filter is not None and user_dir.name != user_filter:
+                continue
+            for project_dir in sorted(user_dir.iterdir()):
+                if not project_dir.is_dir():
+                    continue
+                if project_filter is not None and project_dir.name != project_filter:
+                    continue
+                for session_dir in sorted(project_dir.iterdir()):
+                    if not session_dir.is_dir():
+                        continue
+                    if session_filter is not None and session_dir.name != session_filter:
+                        continue
+                    yield user_dir.name, project_dir.name, session_dir.name
 
     # ------------------------------------------------------------------
     # Public API
@@ -138,6 +181,12 @@ class ArtifactStore:
         surfaces: list[str],
         parameters: dict,
         results: Any,
+        user: str = "default",
+        project: str = "default",
+        name: str | None = None,
+        validation: dict | None = None,
+        telemetry: dict | None = None,
+        run_id: str | None = None,
     ) -> str:
         """Persist an analysis artifact and return its ``run_id``.
 
@@ -156,42 +205,71 @@ class ArtifactStore:
             Flight conditions and/or configuration dict.
         results:
             The tool return value (may contain numpy arrays).
+        user:
+            User identity (from JWT or env/OS).
+        project:
+            Project name for organising runs.
+        name:
+            Optional human-readable label for this run.
+        validation:
+            Validation findings dict to persist alongside results.
+        telemetry:
+            Telemetry dict to persist alongside results.
+        run_id:
+            Pre-generated run ID.  A new one is generated if not supplied.
 
         Returns
         -------
         str
-            The new ``run_id``.
+            The ``run_id`` (either the one provided or a newly generated one).
         """
-        run_id = _make_run_id()
+        if run_id is None:
+            run_id = _make_run_id()
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        metadata = {
+        metadata: dict[str, Any] = {
             "run_id": run_id,
             "session_id": session_id,
+            "user": user,
+            "project": project,
             "analysis_type": analysis_type,
             "timestamp": timestamp,
             "surfaces": surfaces,
             "tool_name": tool_name,
             "parameters": parameters,
         }
-        artifact = {"metadata": metadata, "results": results}
+        if name is not None:
+            metadata["name"] = name
+
+        artifact: dict[str, Any] = {"metadata": metadata, "results": results}
+        if validation is not None:
+            artifact["validation"] = validation
+        if telemetry is not None:
+            artifact["telemetry"] = telemetry
 
         with self._lock:
-            artifact_path = self._artifact_path(session_id, run_id)
+            artifact_path = self._artifact_path(user, project, session_id, run_id)
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
             with artifact_path.open("w") as f:
                 json.dump(artifact, f, indent=2, cls=_NumpyEncoder)
 
-            index = self._load_index(session_id)
-            index.append({
+            index = self._load_index(user, project, session_id)
+            # Deduplicate: remove any existing entry with the same run_id
+            index = [e for e in index if e.get("run_id") != run_id]
+            entry: dict[str, Any] = {
                 "run_id": run_id,
                 "session_id": session_id,
+                "user": user,
+                "project": project,
                 "analysis_type": analysis_type,
                 "timestamp": timestamp,
                 "surfaces": surfaces,
                 "tool_name": tool_name,
-            })
-            self._save_index(session_id, index)
+            }
+            if name is not None:
+                entry["name"] = name
+            index.append(entry)
+            self._save_index(user, project, session_id, index)
 
         return run_id
 
@@ -199,6 +277,8 @@ class ArtifactStore:
         self,
         session_id: str | None = None,
         analysis_type: str | None = None,
+        user: str | None = None,
+        project: str | None = None,
     ) -> list[dict]:
         """Return index entries, optionally filtered.
 
@@ -208,23 +288,28 @@ class ArtifactStore:
             If given, restrict results to that session.
         analysis_type:
             If given, restrict results to that analysis type.
+        user:
+            If given, restrict to that user's artifacts.
+        project:
+            If given, restrict to that project's artifacts.
         """
         with self._lock:
-            if session_id is not None:
-                entries = self._load_index(session_id)
-            else:
-                entries = []
-                if self._data_dir.exists():
-                    for session_dir in sorted(self._data_dir.iterdir()):
-                        if session_dir.is_dir():
-                            entries.extend(self._load_index(session_dir.name))
+            entries: list[dict] = []
+            for u, p, s in self._iter_session_triples(user, project, session_id):
+                entries.extend(self._load_index(u, p, s))
 
             if analysis_type is not None:
                 entries = [e for e in entries if e.get("analysis_type") == analysis_type]
 
             return entries
 
-    def get(self, run_id: str, session_id: str | None = None) -> dict | None:
+    def get(
+        self,
+        run_id: str,
+        session_id: str | None = None,
+        user: str | None = None,
+        project: str | None = None,
+    ) -> dict | None:
         """Return the full artifact (metadata + results), or ``None`` if not found.
 
         Parameters
@@ -232,21 +317,16 @@ class ArtifactStore:
         run_id:
             The run ID to look up.
         session_id:
-            Optional hint.  If supplied the lookup is O(1); otherwise all
-            known session directories are searched.
+            Optional hint.  Narrows the search to directories matching this
+            session name.
+        user:
+            Optional hint.  Restricts search to this user's directory.
+        project:
+            Optional hint.  Restricts search to this project's directory.
         """
         with self._lock:
-            sessions = (
-                [session_id]
-                if session_id is not None
-                else (
-                    [d.name for d in sorted(self._data_dir.iterdir()) if d.is_dir()]
-                    if self._data_dir.exists()
-                    else []
-                )
-            )
-            for sid in sessions:
-                path = self._artifact_path(sid, run_id)
+            for u, p, s in self._iter_session_triples(user, project, session_id):
+                path = self._session_dir(u, p, s) / f"{run_id}.json"
                 if path.exists():
                     try:
                         with path.open() as f:
@@ -255,35 +335,38 @@ class ArtifactStore:
                         return None
         return None
 
-    def get_summary(self, run_id: str, session_id: str | None = None) -> dict | None:
+    def get_summary(
+        self,
+        run_id: str,
+        session_id: str | None = None,
+        user: str | None = None,
+        project: str | None = None,
+    ) -> dict | None:
         """Return artifact metadata only (no results payload), or ``None``."""
-        artifact = self.get(run_id, session_id)
+        artifact = self.get(run_id, session_id, user, project)
         if artifact is None:
             return None
         return artifact.get("metadata")
 
-    def delete(self, run_id: str, session_id: str | None = None) -> bool:
+    def delete(
+        self,
+        run_id: str,
+        session_id: str | None = None,
+        user: str | None = None,
+        project: str | None = None,
+    ) -> bool:
         """Delete an artifact from disk and its index entry.
 
         Returns ``True`` if the artifact was found and removed, ``False``
         if it did not exist.
         """
         with self._lock:
-            sessions = (
-                [session_id]
-                if session_id is not None
-                else (
-                    [d.name for d in sorted(self._data_dir.iterdir()) if d.is_dir()]
-                    if self._data_dir.exists()
-                    else []
-                )
-            )
-            for sid in sessions:
-                path = self._artifact_path(sid, run_id)
+            for u, p, s in self._iter_session_triples(user, project, session_id):
+                path = self._session_dir(u, p, s) / f"{run_id}.json"
                 if path.exists():
                     path.unlink()
-                    index = self._load_index(sid)
+                    index = self._load_index(u, p, s)
                     index = [e for e in index if e.get("run_id") != run_id]
-                    self._save_index(sid, index)
+                    self._save_index(u, p, s, index)
                     return True
         return False
