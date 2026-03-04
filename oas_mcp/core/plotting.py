@@ -180,7 +180,7 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "") -> P
         else:
             y_plot = y
         ax.plot(y_plot, Cl, "b-o", markersize=3, linewidth=1.5)
-        ax.set_xlabel("Normalised spanwise station η = 2y/b  [—]")
+        ax.set_xlabel("Normalised spanwise station η = 2y/b  [—]   (0 = root, 1 = tip)")
         ax.set_ylabel("Sectional lift coefficient  Cl  [—]")
         ax.set_xlim(0, 1)
         cl_min, cl_max = min(Cl), max(Cl)
@@ -342,14 +342,14 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "") ->
                     linewidth=1.5,
                 )
 
-    ax1.set_xlabel("Normalised spanwise station η  [—]")
+    ax1.set_xlabel("Normalised spanwise station η  [—]   (0 = root, 1 = tip)")
     ax1.set_ylabel("von Mises stress  [MPa]")
     ax1.set_title("Von Mises Stress", fontsize=8)
     ax1.legend(fontsize=7)
     ax1.grid(True, alpha=0.3)
 
     ax2.axhline(1.0, color="red", linewidth=1.0, linestyle="--", label="Failure threshold")
-    ax2.set_xlabel("Normalised spanwise station η  [—]")
+    ax2.set_xlabel("Normalised spanwise station η  [—]   (0 = root, 1 = tip)")
     ax2.set_ylabel("Failure index  [—]")
     ax2.set_title("Structural Failure Index", fontsize=8)
     ax2.legend(fontsize=7)
