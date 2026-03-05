@@ -338,6 +338,9 @@ def extract_plot_data(
     opt_history:
         Optimization history dict (for opt_* plots — PNG fallback).
     """
+    if plot_type == "n2":
+        return {"type": "n2", "interactive": False, "has_file": True}
+
     if plot_type in _PNG_FALLBACK_TYPES:
         return {"type": plot_type, "interactive": False}
 
@@ -536,6 +539,7 @@ DASHBOARD_HTML = """\
       <option value="opt_history">Opt History</option>
       <option value="opt_dv_evolution">DV Evolution</option>
       <option value="opt_comparison">Opt Comparison</option>
+      <option value="n2">N2 Diagram</option>
     </select>
     <button id="refresh-btn">↻ Refresh</button>
     <button id="close-btn">✕</button>
@@ -617,7 +621,9 @@ function renderFromContent(content) {
   document.getElementById('status').style.display = 'none';
   document.getElementById('chart').style.display = 'block';
 
-  if (plotData?.interactive) {
+  if (plotType === 'n2' && meta.format === 'html_file') {
+    renderN2Card(meta, runId);
+  } else if (plotData?.interactive) {
     renderPlotly(plotData, plotType === 'drag_polar' || plotType === 'stress_distribution');
   } else if (pngDataUrl) {
     renderPNG(pngDataUrl);
@@ -837,6 +843,47 @@ async function visualizeRun(runId, btn) {
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
+  }
+}
+
+function renderN2Card(meta, runId) {
+  const el = document.getElementById('chart');
+  el.style.height = 'auto';
+  const kb = Math.round((meta.size_bytes || 0) / 1024);
+  el.innerHTML =
+    '<div style="padding:24px;border:1px solid var(--border,#ccc);border-radius:8px;max-width:560px;margin:16px auto">' +
+    '<h2 style="margin:0 0 12px;font-size:1.1em">N2 Diagram</h2>' +
+    '<p style="margin:0 0 8px;color:var(--muted,#666)">Interactive Design Structure Matrix (' + esc(String(kb)) + ' KB)</p>' +
+    '<button id="n2-open-btn" style="padding:8px 18px;font-size:0.9em">Open N2 Diagram</button>' +
+    '<span id="n2-spinner" style="display:none;margin-left:10px;color:var(--muted,#666)">Loading\u2026</span>' +
+    '</div>';
+  document.getElementById('n2-open-btn').addEventListener('click', () => loadN2Inline(runId));
+}
+
+async function loadN2Inline(runId) {
+  const btn     = document.getElementById('n2-open-btn');
+  const spinner = document.getElementById('n2-spinner');
+  btn.disabled  = true;
+  spinner.style.display = '';
+  try {
+    const result  = await app.callServerTool({ name: 'get_n2_html', arguments: { run_id: runId } });
+    const content = Array.isArray(result.content) ? result.content : [];
+    const html    = content.find(c => c.type === 'text')?.text;
+    if (!html) throw new Error('No HTML in response');
+    const blob = new Blob([html], { type: 'text/html' });
+    const url  = URL.createObjectURL(blob);
+    const el   = document.getElementById('chart');
+    el.innerHTML = '';
+    el.style.height = '600px';
+    const iframe = document.createElement('iframe');
+    iframe.src   = url;
+    iframe.style.cssText = 'width:100%;height:100%;border:none';
+    iframe.addEventListener('load', () => URL.revokeObjectURL(url));
+    el.appendChild(iframe);
+  } catch (e) {
+    alert('Failed to load N2: ' + (e.message || String(e)));
+    btn.disabled  = false;
+    spinner.style.display = 'none';
   }
 }
 
