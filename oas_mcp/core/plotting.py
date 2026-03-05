@@ -27,14 +27,30 @@ Standard pixel dimensions: 900 × 540 px at 150 dpi
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
+import json
+import zlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from mcp.server.fastmcp.utilities.types import Image
+
+
+@dataclass
+class N2Result:
+    """Container for a generated N2 diagram saved to disk.
+
+    ``metadata`` is a plain dict with file path, size, hash, and compressed
+    viewer data — small enough to return as a single TextContent.
+    ``file_path`` is the absolute path to the saved HTML file.
+    """
+    metadata: dict  # plot_type, format, file_path, size_bytes, image_hash, viewer_data_compressed
+    file_path: str  # absolute path to the saved HTML file
 
 
 @dataclass
@@ -87,6 +103,7 @@ PLOT_TYPES = frozenset({
     "opt_history",
     "opt_dv_evolution",
     "opt_comparison",
+    "n2",
 })
 
 _FIG_WIDTH_IN = 6.0   # inches
@@ -695,6 +712,101 @@ def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str 
 
 
 # ---------------------------------------------------------------------------
+# N2 / DSM diagram (HTML saved to disk)
+# ---------------------------------------------------------------------------
+
+
+class _NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy scalars and arrays."""
+
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, np.ndarray):
+            if np.issubdtype(obj.dtype, np.complexfloating):
+                return obj.real.tolist()
+            return obj.tolist()
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.complexfloating):
+            return float(obj.real)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, complex):
+            return obj.real
+        # Catch-all: type objects, enums, or other unserializable values from
+        # OpenMDAO viewer data — convert to string rather than crash.
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)
+
+
+def generate_n2(
+    prob,
+    run_id: str,
+    case_name: str = "",
+    output_dir: str | Path | None = None,
+) -> N2Result:
+    """Generate an interactive N2 (Design Structure Matrix) diagram saved to disk.
+
+    Calls ``openmdao.api.n2()`` to write a self-contained HTML file and
+    extracts compressed viewer data for lightweight metadata delivery.
+
+    Parameters
+    ----------
+    prob:
+        A set-up (and ideally run) ``openmdao.api.Problem`` instance.
+    run_id:
+        Artifact run ID — used to name the file and included in metadata.
+    case_name:
+        Optional human-readable label used as the diagram title.
+    output_dir:
+        Directory to write the HTML file.  Falls back to ``./oas_data/n2/``.
+
+    Returns
+    -------
+    N2Result
+        ``metadata`` dict (small, ~15 KB) with ``file_path``, ``size_bytes``,
+        ``image_hash``, and ``viewer_data_compressed`` (base64 zlib ~11 KB).
+        ``file_path`` is the absolute path to the saved HTML file.
+    """
+    import openmdao.api as om
+    from openmdao.visualization.n2_viewer.n2_viewer import _get_viewer_data
+
+    out_dir = Path(output_dir) if output_dir is not None else Path("./oas_data/n2")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / f"n2_{run_id}.html"
+
+    title = case_name or run_id
+    om.n2(prob, outfile=str(output_path), show_browser=False, embeddable=False, title=title)
+
+    html_bytes = output_path.read_bytes()
+    sha = "sha256-" + hashlib.sha256(html_bytes).hexdigest()[:16]
+
+    # Extract model data dict and compress it for lightweight delivery
+    viewer_data = _get_viewer_data(prob, values=True)
+    compressed = base64.b64encode(
+        zlib.compress(json.dumps(viewer_data, cls=_NumpyEncoder).encode())
+    ).decode()
+
+    metadata = {
+        "plot_type": "n2",
+        "run_id": run_id,
+        "format": "html_file",
+        "file_path": str(output_path.resolve()),
+        "size_bytes": len(html_bytes),
+        "image_hash": sha,
+        "viewer_data_compressed": compressed,
+        "note": (
+            f"Interactive N2 diagram saved to {output_path.resolve()}. "
+            "Open in a browser to explore."
+        ),
+    }
+    return N2Result(metadata=metadata, file_path=str(output_path.resolve()))
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -737,6 +849,12 @@ def generate_plot(
         raise ValueError(
             f"Unknown plot_type {plot_type!r}. "
             f"Supported types: {sorted(PLOT_TYPES)}"
+        )
+
+    if plot_type == "n2":
+        raise ValueError(
+            "plot_type='n2' must be handled in server.py via generate_n2(), "
+            "not through generate_plot()."
         )
 
     if plot_type == "lift_distribution":

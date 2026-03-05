@@ -44,7 +44,7 @@ from .core.defaults import (
 from .core.envelope import make_envelope, make_error_envelope
 from .core.errors import OASMCPError, UserInputError, SolverConvergenceError
 from .core.mesh import apply_dihedral, apply_sweep, apply_taper, build_mesh
-from .core.plotting import PLOT_TYPES, generate_plot
+from .core.plotting import PLOT_TYPES, generate_plot, generate_n2
 from .core.widget import DASHBOARD_HTML, extract_plot_data
 from .core.requirements import check_requirements
 from .core.results import (
@@ -1402,12 +1402,12 @@ async def visualize(
     plot_type: Annotated[
         str,
         "Plot type — one of: lift_distribution, drag_polar, stress_distribution, "
-        "convergence, planform, opt_history, opt_dv_evolution, opt_comparison",
+        "convergence, planform, opt_history, opt_dv_evolution, opt_comparison, n2",
     ],
     session_id: Annotated[str | None, "Session hint for faster artifact lookup"] = None,
     case_name: Annotated[str, "Human-readable label for the plot title"] = "",
 ) -> list:
-    """Generate a visualisation plot and return a base64-encoded PNG.
+    """Generate a visualisation plot and return a base64-encoded PNG (or HTML for n2).
 
     Response includes:
       plot_type, run_id, format, width_px, height_px, image_hash, image_base64
@@ -1424,6 +1424,7 @@ async def visualize(
       opt_history         — optimizer objective convergence (optimization runs only)
       opt_dv_evolution    — design variable evolution over iterations (optimization only)
       opt_comparison      — before/after DV comparison: initial vs optimized values
+      n2                  — interactive N2/DSM diagram (saves HTML to disk, returns metadata with file_path)
     """
     if plot_type not in PLOT_TYPES:
         raise ValueError(
@@ -1434,6 +1435,30 @@ async def visualize(
     artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id)
     if artifact is None:
         raise ValueError(f"Run '{run_id}' not found.")
+
+    # N2 diagram — needs a live OpenMDAO Problem, not artifact data
+    if plot_type == "n2":
+        artifact_meta = artifact.get("metadata", {})
+        sid = artifact_meta.get("session_id", session_id or "default")
+        user = artifact_meta.get("user", get_current_user())
+        project = artifact_meta.get("project", "default")
+        session = _sessions.get(sid)
+        analysis_type = artifact_meta.get("analysis_type", "aero")
+        surfaces = artifact_meta.get("surfaces", [])
+
+        # Optimization runs wrap an underlying aero or aerostruct analysis
+        if analysis_type == "optimization":
+            analysis_type = artifact.get("results", {}).get("analysis_type", "aero")
+
+        prob = session.get_cached_problem(surfaces, analysis_type) if session else None
+        if prob is None:
+            raise ValueError(
+                f"No cached OpenMDAO Problem for run '{run_id}'. "
+                "Re-run the analysis in the current session, then call visualize again."
+            )
+        output_dir = _artifacts._data_dir / user / project / sid
+        n2_result = await asyncio.to_thread(generate_n2, prob, run_id, case_name, output_dir)
+        return [n2_result.metadata]
 
     results = artifact.get("results", {})
     artifact_type = artifact.get("metadata", {}).get("analysis_type", "")
@@ -1494,6 +1519,41 @@ async def visualize(
         plot_type, plot_results, conv_data, mesh_data, opt_history
     )
     return [plot_result.metadata, plot_result.image]
+
+
+@mcp.tool()
+async def get_n2_html(
+    run_id: Annotated[str, "Run ID whose N2 diagram to fetch"],
+    session_id: Annotated[str | None, "Session hint for faster artifact lookup"] = None,
+) -> list:
+    """Fetch the saved N2 HTML file for a run.
+
+    Called on-demand (e.g. by the widget download button) after visualize() has
+    already generated the file.  Returns the full HTML as TextContent so the
+    caller can save or display it.
+
+    Raises ValueError if the artifact is not found or the N2 file has not been
+    generated yet (call visualize(run_id, 'n2') first).
+    """
+    from mcp.types import TextContent
+
+    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id)
+    if artifact is None:
+        raise ValueError(f"Run '{run_id}' not found.")
+
+    artifact_meta = artifact.get("metadata", {})
+    user = artifact_meta.get("user", get_current_user())
+    project = artifact_meta.get("project", "default")
+    sid = artifact_meta.get("session_id", session_id or "default")
+
+    n2_path = _artifacts._data_dir / user / project / sid / f"n2_{run_id}.html"
+    if not n2_path.exists():
+        raise ValueError(
+            f"N2 HTML file not found at {n2_path}. "
+            "Call visualize(run_id, 'n2') first to generate it."
+        )
+    html = n2_path.read_text(encoding="utf-8")
+    return [TextContent(type="text", text=html)]
 
 
 @mcp.tool()

@@ -12,7 +12,10 @@ import numpy as np
 
 from mcp.server.fastmcp.utilities.types import Image
 from oas_mcp.core.plotting import (
+    PLOT_TYPES,
+    N2Result,
     PlotResult,
+    generate_n2,
     plot_lift_distribution,
     plot_stress_distribution,
     plot_planform,
@@ -384,3 +387,97 @@ class TestAerostructVisualizationE2E:
         assert len(fi) == len(vm), (
             f"Expected len(failure_index)==len(vonmises_MPa), got {len(fi)} vs {len(vm)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: N2 diagram
+# ---------------------------------------------------------------------------
+
+
+class TestN2Diagram:
+    def test_n2_in_plot_types(self):
+        assert "n2" in PLOT_TYPES
+
+    def test_n2_returns_file(self, tmp_path):
+        """generate_n2() writes HTML to disk and returns lightweight metadata."""
+        import openmdao.api as om
+
+        prob = om.Problem()
+        prob.model.add_subsystem("comp", om.ExecComp("y = x**2"))
+        prob.setup()
+        prob.run_model()
+
+        result = generate_n2(prob, "test-run-n2", output_dir=tmp_path)
+        assert isinstance(result, N2Result)
+        meta = result.metadata
+        assert meta["format"] == "html_file"
+        assert meta["plot_type"] == "n2"
+        assert meta["run_id"] == "test-run-n2"
+        assert "image_hash" in meta
+        assert meta["size_bytes"] > 100
+        assert "viewer_data_compressed" in meta
+
+        # File must exist on disk and be valid HTML
+        from pathlib import Path
+        p = Path(result.file_path)
+        assert p.exists(), f"N2 file not found at {p}"
+        html = p.read_text(encoding="utf-8")
+        assert html.lower().lstrip().startswith(("<!doctype", "<html")), \
+            "File does not look like HTML"
+
+    def test_n2_case_name_in_title(self, tmp_path):
+        """case_name is embedded in the generated HTML file."""
+        import openmdao.api as om
+        from pathlib import Path
+
+        prob = om.Problem()
+        prob.model.add_subsystem("comp", om.ExecComp("z = x + y"))
+        prob.setup()
+        prob.run_model()
+
+        result = generate_n2(prob, "test-run-n2b", case_name="My Wing", output_dir=tmp_path)
+        assert result.metadata["format"] == "html_file"
+        html = Path(result.file_path).read_text(encoding="utf-8")
+        assert "My Wing" in html, "case_name not found in generated HTML"
+
+    def test_n2_viewer_data_compressed(self, tmp_path):
+        """viewer_data_compressed decompresses to a dict with expected keys."""
+        import base64
+        import json
+        import zlib
+        import openmdao.api as om
+
+        prob = om.Problem()
+        prob.model.add_subsystem("comp", om.ExecComp("y = x**2"))
+        prob.setup()
+        prob.run_model()
+
+        result = generate_n2(prob, "test-run-n2c", output_dir=tmp_path)
+        compressed = result.metadata["viewer_data_compressed"]
+        data = json.loads(zlib.decompress(base64.b64decode(compressed)))
+        assert "tree" in data, "Decompressed viewer data missing 'tree' key"
+        assert "connections_list" in data, "Decompressed viewer data missing 'connections_list' key"
+
+
+@pytest.mark.slow
+class TestN2DiagramE2E:
+    """Integration test: create surface → run analysis → visualize n2."""
+
+    async def test_n2_e2e(self, aero_wing):
+        from oas_mcp.server import run_aero_analysis, visualize
+        from pathlib import Path
+
+        envelope = await run_aero_analysis(surfaces=["wing"])
+        run_id = envelope["run_id"]
+
+        response = await visualize(run_id=run_id, plot_type="n2")
+        # Single-element list — no large TextContent returned
+        assert isinstance(response, list) and len(response) == 1
+        metadata = response[0]
+        assert isinstance(metadata, dict)
+        assert metadata["format"] == "html_file"
+        assert metadata["plot_type"] == "n2"
+        assert "image_hash" in metadata
+        assert "file_path" in metadata
+        assert Path(metadata["file_path"]).exists(), \
+            f"N2 file not found at {metadata['file_path']}"
