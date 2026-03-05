@@ -402,7 +402,7 @@ class TestN2Diagram:
         """generate_n2() writes HTML to disk and returns lightweight metadata."""
         import openmdao.api as om
 
-        prob = om.Problem()
+        prob = om.Problem(reports=False)
         prob.model.add_subsystem("comp", om.ExecComp("y = x**2"))
         prob.setup()
         prob.run_model()
@@ -430,7 +430,7 @@ class TestN2Diagram:
         import openmdao.api as om
         from pathlib import Path
 
-        prob = om.Problem()
+        prob = om.Problem(reports=False)
         prob.model.add_subsystem("comp", om.ExecComp("z = x + y"))
         prob.setup()
         prob.run_model()
@@ -447,7 +447,7 @@ class TestN2Diagram:
         import zlib
         import openmdao.api as om
 
-        prob = om.Problem()
+        prob = om.Problem(reports=False)
         prob.model.add_subsystem("comp", om.ExecComp("y = x**2"))
         prob.setup()
         prob.run_model()

@@ -105,6 +105,9 @@ class Session:
     # run_id → mesh snapshot (for planform plots)
     _mesh_snapshots: dict[str, dict] = field(default_factory=dict, repr=False)
 
+    # analysis_type:surface_names → results dict (for delta summaries)
+    _last_results: dict[str, dict] = field(default_factory=dict, repr=False)
+
     def add_surface(self, surface: dict) -> None:
         name = surface["name"]
         self.surfaces[name] = surface
@@ -201,17 +204,29 @@ class Session:
     # Convergence & mesh snapshots
     # ------------------------------------------------------------------
 
+    def _bounded_store(self, store: dict, key: str, value: Any, maxlen: int = 100) -> None:
+        """Insert *key*→*value* into *store*, evicting the oldest entry if over *maxlen*."""
+        store[key] = value
+        if len(store) > maxlen:
+            del store[next(iter(store))]
+
     def store_convergence(self, run_id: str, data: dict) -> None:
-        self._convergence[run_id] = data
+        self._bounded_store(self._convergence, run_id, data)
 
     def get_convergence(self, run_id: str) -> dict | None:
         return self._convergence.get(run_id)
 
     def store_mesh_snapshot(self, run_id: str, data: dict) -> None:
-        self._mesh_snapshots[run_id] = data
+        self._bounded_store(self._mesh_snapshots, run_id, data)
 
     def get_mesh_snapshot(self, run_id: str) -> dict | None:
         return self._mesh_snapshots.get(run_id)
+
+    def store_last_results(self, names: list[str], analysis_type: str, results: dict) -> None:
+        self._bounded_store(self._last_results, self._cache_key(names, analysis_type), results)
+
+    def get_last_results(self, names: list[str], analysis_type: str) -> dict | None:
+        return self._last_results.get(self._cache_key(names, analysis_type))
 
     # ------------------------------------------------------------------
     # Configure defaults
@@ -254,6 +269,7 @@ class Session:
         self._pinned.clear()
         self._convergence.clear()
         self._mesh_snapshots.clear()
+        self._last_results.clear()
         self.defaults = SessionDefaults()
         self.requirements = []
         self.project = "default"

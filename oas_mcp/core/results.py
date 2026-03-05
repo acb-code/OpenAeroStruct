@@ -217,7 +217,7 @@ def extract_standard_detail(
                 elif "vonmises_MPa" in sect:
                     # FailureKS returns a scalar; derive per-element failure index
                     # from vonmises: failure_i = vm / sigma_allow - 1
-                    yield_stress = surface.get("yield_stress", 500e6)
+                    yield_stress = surface.get("yield", 500e6)
                     safety_factor = surface.get("safety_factor", 2.5)
                     sigma_allow = yield_stress / safety_factor
                     vm_pa = np.array(sect["vonmises_MPa"]) * 1e6

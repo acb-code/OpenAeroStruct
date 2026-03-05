@@ -716,22 +716,19 @@ def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str 
 # ---------------------------------------------------------------------------
 
 
-class _NumpyEncoder(json.JSONEncoder):
-    """JSON encoder that handles numpy scalars and arrays."""
+from .artifacts import _NumpyEncoder as _ArtifactsEncoder
+
+
+class _NumpyEncoder(_ArtifactsEncoder):
+    """JSON encoder for numpy types; extends artifacts encoder with OTel/complex support."""
 
     def default(self, obj: Any) -> Any:
         if isinstance(obj, np.ndarray):
             if np.issubdtype(obj.dtype, np.complexfloating):
                 return obj.real.tolist()
             return obj.tolist()
-        if isinstance(obj, np.integer):
-            return int(obj)
         if isinstance(obj, np.complexfloating):
             return float(obj.real)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.bool_):
-            return bool(obj)
         if isinstance(obj, complex):
             return obj.real
         # Catch-all: type objects, enums, or other unserializable values from

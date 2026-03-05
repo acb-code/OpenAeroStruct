@@ -11,10 +11,6 @@ def build_mesh(
     span: float,
     root_chord: float,
     symmetry: bool,
-    sweep: float = 0.0,
-    dihedral: float = 0.0,
-    taper: float = 1.0,
-    twist_cp=None,
     offset=None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """

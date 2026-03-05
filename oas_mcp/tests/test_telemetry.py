@@ -63,23 +63,3 @@ class TestRunLogs:
     def test_unknown_run_id_returns_empty(self):
         logs = get_run_logs("nonexistent_run_id_xyz")
         assert logs is None or logs == []
-
-    def test_log_capture_during_span(self):
-        import logging
-        from oas_mcp.core.telemetry import span, logger
-        import asyncio
-
-        run_id = "test_run_" + "abc123"
-
-        async def _run():
-            async with asyncio.timeout(5):
-                with span("test_tool", run_id, "default") as attrs:
-                    logger.info("test message from span")
-                    attrs["test_key"] = "test_value"
-
-        asyncio.get_event_loop().run_until_complete(_run())
-        logs = get_run_logs(run_id)
-        assert logs is not None
-        messages = [r["message"] for r in logs]
-        # Should have at least START and END records
-        assert any("test_tool" in m for m in messages)

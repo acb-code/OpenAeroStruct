@@ -5,14 +5,12 @@ Features
 - Structured logging with correlation IDs (run_id, session_id, tool_name)
 - Per-run log capture so agents can call ``get_last_logs(run_id)``
 - Redaction: arrays are replaced with shape/hash summaries; no raw geometry
-- Optional OpenTelemetry integration (off by default; enable via env var)
 - Semantic attribute conventions:
     mcp.tool.name, oas.surface.count, oas.mesh.nx, oas.mesh.ny,
     oas.solver.converged, oas.cache.hit
 
 Environment variables
 ---------------------
-OAS_TELEMETRY_MODE: "off" (default) | "logging" | "otel"
 OAS_LOG_LEVEL:      "DEBUG" | "INFO" (default) | "WARNING" | "ERROR"
 OAS_LOG_MAX_RUNS:   max number of run log buffers to retain (default: 100)
 """
@@ -22,9 +20,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import time
 from collections import deque
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
@@ -35,7 +31,6 @@ import numpy as np
 # Configuration
 # ---------------------------------------------------------------------------
 
-_TELEMETRY_MODE = os.environ.get("OAS_TELEMETRY_MODE", "logging").lower()
 _LOG_LEVEL = getattr(logging, os.environ.get("OAS_LOG_LEVEL", "INFO").upper(), logging.INFO)
 _MAX_RUNS = int(os.environ.get("OAS_LOG_MAX_RUNS", "100"))
 
@@ -88,7 +83,10 @@ class _RunLogHandler(logging.Handler):
         with self._lock:
             if self._active is buf:
                 self._active = None
-            # Evict oldest if needed (deque handles maxlen)
+            # Evict oldest entry from _by_run_id before deque overwrites it
+            if len(self._store) == self._store.maxlen:
+                evicted = self._store[0]
+                self._by_run_id.pop(evicted.run_id, None)
             self._store.append(buf)
             self._by_run_id[buf.run_id] = buf
 
@@ -151,76 +149,6 @@ def redact(obj: Any, max_depth: int = 4) -> Any:
             return f"[list of {len(obj)} items]"
         return [redact(v, max_depth - 1) for v in obj]
     return obj
-
-
-# ---------------------------------------------------------------------------
-# Span context manager
-# ---------------------------------------------------------------------------
-
-
-@contextmanager
-def span(
-    tool_name: str,
-    run_id: str,
-    session_id: str = "default",
-    attributes: dict | None = None,
-):
-    """Context manager that brackets an OAS tool call with timing + logs.
-
-    Emits structured log records on entry and exit.  If OAS_TELEMETRY_MODE
-    includes "otel", also creates an OpenTelemetry span (when available).
-
-    Yields
-    ------
-    dict  — mutable attributes dict; callers can add keys during the span.
-    """
-    attrs: dict[str, Any] = {
-        "mcp.tool.name": tool_name,
-        "oas.run_id": run_id,
-        "oas.session_id": session_id,
-        **(attributes or {}),
-    }
-
-    buf = _RunLogBuffer(run_id=run_id, session_id=session_id, tool_name=tool_name)
-    _run_log_handler.set_active(buf)
-
-    t0 = time.perf_counter()
-    logger.info("START %s run_id=%s session=%s", tool_name, run_id, session_id)
-
-    otel_span = None
-    if _TELEMETRY_MODE == "otel":
-        try:
-            from opentelemetry import trace as _trace
-            tracer = _trace.get_tracer("oas_mcp")
-            otel_span = tracer.start_span(tool_name)
-            for k, v in attrs.items():
-                otel_span.set_attribute(k, str(v))
-        except ImportError:
-            pass
-
-    try:
-        yield attrs
-        elapsed = time.perf_counter() - t0
-        attrs["elapsed_s"] = round(elapsed, 4)
-        logger.info(
-            "END   %s run_id=%s elapsed=%.3fs",
-            tool_name, run_id, elapsed,
-        )
-    except Exception as exc:
-        elapsed = time.perf_counter() - t0
-        attrs["elapsed_s"] = round(elapsed, 4)
-        attrs["error"] = str(exc)
-        logger.error(
-            "ERROR %s run_id=%s elapsed=%.3fs error=%r",
-            tool_name, run_id, elapsed, str(exc),
-        )
-        if otel_span:
-            otel_span.record_exception(exc)
-        raise
-    finally:
-        _run_log_handler.clear_active(buf)
-        if otel_span:
-            otel_span.end()
 
 
 def get_run_logs(run_id: str) -> list[dict] | None:

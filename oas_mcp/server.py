@@ -54,6 +54,13 @@ from .core.results import (
     extract_standard_detail,
 )
 from .core.telemetry import get_run_logs, make_telemetry
+from .core.summary import (
+    summarize_aero,
+    summarize_aerostruct,
+    summarize_drag_polar,
+    summarize_stability,
+    summarize_optimization,
+)
 from .core.validation import (
     findings_to_dict,
     validate_aero,
@@ -217,7 +224,7 @@ async def _apply_auto_plots(
     Silently skips any plot_type that fails (e.g. drag_polar requested for an
     aero run that has no alpha sweep data).
     """
-    plot_types = getattr(session, "auto_visualize", [])
+    plot_types = session.defaults.auto_visualize
     if not plot_types:
         return
 
@@ -253,6 +260,105 @@ async def _apply_auto_plots(
 
     if auto_plots:
         envelope["auto_plots"] = auto_plots
+
+
+# ---------------------------------------------------------------------------
+# Summary dispatch table
+# ---------------------------------------------------------------------------
+
+_SUMMARIZERS = {
+    "aero":         lambda r, sd, ctx, prev: summarize_aero(r, sd, ctx, prev),
+    "aerostruct":   lambda r, sd, ctx, prev: summarize_aerostruct(r, sd, ctx, prev),
+    "drag_polar":   lambda r, _sd, ctx, prev: summarize_drag_polar(r, ctx, prev),
+    "stability":    lambda r, _sd, ctx, prev: summarize_stability(r, ctx, prev),
+    "optimization": lambda r, sd, ctx, _prev: summarize_optimization(r, sd, ctx),
+}
+
+
+async def _finalize_analysis(
+    tool_name: str,
+    run_id: str,
+    session,
+    session_id: str,
+    surfaces: list[str],
+    analysis_type: str,
+    inputs: dict,
+    results: dict,
+    standard_detail: dict | None,
+    findings: list,
+    t0: float,
+    cache_hit: bool,
+    run_name: str | None = None,
+    surface_dicts: list[dict] | None = None,
+    auto_plots: bool = True,
+) -> dict:
+    """Shared post-analysis: validate requirements, build telemetry, save artifact, build envelope."""
+    from .core.validation import ValidationFinding
+
+    # Inject failed requirements as validation findings
+    if session.requirements:
+        req_report = check_requirements(session.requirements, results)
+        for outcome in req_report.get("results", []):
+            if not outcome.get("passed"):
+                findings.append(ValidationFinding(
+                    check_id=f"requirements.{outcome['label']}",
+                    category="constraints",
+                    severity="error",
+                    confidence="high",
+                    passed=False,
+                    message=(
+                        f"Requirement '{outcome['label']}': {outcome['path']} "
+                        f"{outcome['operator']} {outcome['target']} "
+                        f"(actual: {outcome.get('actual')})"
+                    ),
+                    remediation="Adjust design or requirements.",
+                ))
+
+    validation = findings_to_dict(findings)
+    elapsed = time.perf_counter() - t0
+
+    mesh_shape = None
+    if surface_dicts:
+        m = surface_dicts[0].get("mesh")
+        if m is not None:
+            mesh_shape = tuple(m.shape)
+    telem = make_telemetry(elapsed, cache_hit, len(surfaces), mesh_shape)
+
+    # Physics summary (narrative + derived metrics + delta vs previous run)
+    previous_results = session.get_last_results(surfaces, analysis_type)
+    summarize_fn = _SUMMARIZERS.get(analysis_type)
+    summary = summarize_fn(results, standard_detail, inputs, previous_results) if summarize_fn else None
+    session.store_last_results(surfaces, analysis_type, results)
+
+    # Build results payload for artifact storage
+    results_to_save = dict(results)
+    if standard_detail:
+        results_to_save["standard_detail"] = standard_detail
+    conv_data = session.get_convergence(run_id)
+    if conv_data:
+        results_to_save["convergence"] = conv_data
+
+    _artifacts.save(
+        session_id=session_id,
+        analysis_type=analysis_type,
+        tool_name=tool_name,
+        surfaces=surfaces,
+        parameters=inputs,
+        results=results_to_save,
+        user=get_current_user(),
+        project=session.project,
+        name=run_name,
+        validation=validation,
+        telemetry=telem,
+        run_id=run_id,
+    )
+
+    envelope = make_envelope(tool_name, run_id, inputs, results, validation, telem)
+    if summary is not None:
+        envelope["summary"] = summary
+    if auto_plots:
+        await _apply_auto_plots(envelope, session, run_id, results, standard_detail)
+    return envelope
 
 
 # ---------------------------------------------------------------------------
@@ -343,9 +449,6 @@ async def create_surface(
             span=span,
             root_chord=root_chord,
             symmetry=symmetry,
-            sweep=sweep,
-            dihedral=dihedral,
-            taper=taper,
             offset=offset,
         )
 
@@ -525,60 +628,21 @@ async def run_aero_analysis(
     cache_hit = session.get_cached_problem(surfaces, "aero") is not None
     results, standard_detail = await asyncio.to_thread(_suppress_output, _run)
 
-    # Store mesh snapshot in session for live retrieval
     session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
 
     inputs = {
         "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
         "reynolds_number": reynolds_number, "density": density,
     }
-
     findings = validate_aero(results, context={"alpha": alpha})
-    if session.requirements:
-        req_report = check_requirements(session.requirements, results)
-        for outcome in req_report.get("results", []):
-            if not outcome.get("passed"):
-                from .core.validation import ValidationFinding
-                findings.append(ValidationFinding(
-                    check_id=f"requirements.{outcome['label']}",
-                    category="constraints",
-                    severity="error",
-                    confidence="high",
-                    passed=False,
-                    message=f"Requirement '{outcome['label']}': {outcome['path']} {outcome['operator']} {outcome['target']} (actual: {outcome.get('actual')})",
-                    remediation="Adjust design or requirements.",
-                ))
-    validation = findings_to_dict(findings)
-    elapsed = time.perf_counter() - t0
-    mesh_shape = None
-    if surface_dicts:
-        m = surface_dicts[0].get("mesh")
-        if m is not None:
-            mesh_shape = tuple(m.shape)
-    telem = make_telemetry(elapsed, cache_hit, len(surfaces), mesh_shape)
-
-    results_to_save = {**results, "standard_detail": standard_detail}
-    conv_data = session.get_convergence(run_id)
-    if conv_data:
-        results_to_save["convergence"] = conv_data
-    _artifacts.save(
-        session_id=session_id,
-        analysis_type="aero",
-        tool_name="run_aero_analysis",
-        surfaces=surfaces,
-        parameters=inputs,
-        results=results_to_save,
-        user=get_current_user(),
-        project=session.project,
-        name=run_name,
-        validation=validation,
-        telemetry=telem,
-        run_id=run_id,
+    return await _finalize_analysis(
+        tool_name="run_aero_analysis", run_id=run_id,
+        session=session, session_id=session_id, surfaces=surfaces,
+        analysis_type="aero", inputs=inputs, results=results,
+        standard_detail=standard_detail, findings=findings,
+        t0=t0, cache_hit=cache_hit, run_name=run_name,
+        surface_dicts=surface_dicts, auto_plots=True,
     )
-
-    envelope = make_envelope("run_aero_analysis", run_id, inputs, results, validation, telem)
-    await _apply_auto_plots(envelope, session, run_id, results, standard_detail)
-    return envelope
 
 
 # ---------------------------------------------------------------------------
@@ -671,53 +735,15 @@ async def run_aerostruct_analysis(
         "reynolds_number": reynolds_number, "density": density,
         "W0": W0, "R": R, "speed_of_sound": speed_of_sound, "load_factor": load_factor,
     }
-
     findings = validate_aerostruct(results, context={"alpha": alpha, "W0": W0})
-    if session.requirements:
-        req_report = check_requirements(session.requirements, results)
-        for outcome in req_report.get("results", []):
-            if not outcome.get("passed"):
-                from .core.validation import ValidationFinding
-                findings.append(ValidationFinding(
-                    check_id=f"requirements.{outcome['label']}",
-                    category="constraints",
-                    severity="error",
-                    confidence="high",
-                    passed=False,
-                    message=f"Requirement '{outcome['label']}': {outcome['path']} {outcome['operator']} {outcome['target']} (actual: {outcome.get('actual')})",
-                    remediation="Adjust design or requirements.",
-                ))
-    validation = findings_to_dict(findings)
-    elapsed = time.perf_counter() - t0
-    mesh_shape = None
-    if surface_dicts:
-        m = surface_dicts[0].get("mesh")
-        if m is not None:
-            mesh_shape = tuple(m.shape)
-    telem = make_telemetry(elapsed, cache_hit, len(surfaces), mesh_shape)
-
-    results_to_save = {**results, "standard_detail": standard_detail}
-    conv_data = session.get_convergence(run_id)
-    if conv_data:
-        results_to_save["convergence"] = conv_data
-    _artifacts.save(
-        session_id=session_id,
-        analysis_type="aerostruct",
-        tool_name="run_aerostruct_analysis",
-        surfaces=surfaces,
-        parameters=inputs,
-        results=results_to_save,
-        user=get_current_user(),
-        project=session.project,
-        name=run_name,
-        validation=validation,
-        telemetry=telem,
-        run_id=run_id,
+    return await _finalize_analysis(
+        tool_name="run_aerostruct_analysis", run_id=run_id,
+        session=session, session_id=session_id, surfaces=surfaces,
+        analysis_type="aerostruct", inputs=inputs, results=results,
+        standard_detail=standard_detail, findings=findings,
+        t0=t0, cache_hit=cache_hit, run_name=run_name,
+        surface_dicts=surface_dicts, auto_plots=True,
     )
-
-    envelope = make_envelope("run_aerostruct_analysis", run_id, inputs, results, validation, telem)
-    await _apply_auto_plots(envelope, session, run_id, results, standard_detail)
-    return envelope
 
 
 # ---------------------------------------------------------------------------
@@ -806,28 +832,14 @@ async def compute_drag_polar(
     }
 
     findings = validate_drag_polar(polar_results, context={"alpha_start": alpha_start})
-    validation = findings_to_dict(findings)
-    elapsed = time.perf_counter() - t0
-    telem = make_telemetry(elapsed, False, len(surfaces))
-
-    _artifacts.save(
-        session_id=session_id,
-        analysis_type="drag_polar",
-        tool_name="compute_drag_polar",
-        surfaces=surfaces,
-        parameters=inputs,
-        results=polar_results,
-        user=get_current_user(),
-        project=session.project,
-        name=run_name,
-        validation=validation,
-        telemetry=telem,
-        run_id=run_id,
+    return await _finalize_analysis(
+        tool_name="compute_drag_polar", run_id=run_id,
+        session=session, session_id=session_id, surfaces=surfaces,
+        analysis_type="drag_polar", inputs=inputs, results=polar_results,
+        standard_detail=None, findings=findings,
+        t0=t0, cache_hit=False, run_name=run_name,
+        surface_dicts=None, auto_plots=True,
     )
-
-    envelope = make_envelope("compute_drag_polar", run_id, inputs, polar_results, validation, telem)
-    await _apply_auto_plots(envelope, session, run_id, polar_results)
-    return envelope
 
 
 # ---------------------------------------------------------------------------
@@ -959,26 +971,14 @@ async def compute_stability_derivatives(
     }
 
     findings = validate_stability(results, context={"alpha": alpha})
-    validation = findings_to_dict(findings)
-    elapsed = time.perf_counter() - t0
-    telem = make_telemetry(elapsed, False, len(surfaces))
-
-    _artifacts.save(
-        session_id=session_id,
-        analysis_type="stability",
-        tool_name="compute_stability_derivatives",
-        surfaces=surfaces,
-        parameters=inputs,
-        results=results,
-        user=get_current_user(),
-        project=session.project,
-        name=run_name,
-        validation=validation,
-        telemetry=telem,
-        run_id=run_id,
+    return await _finalize_analysis(
+        tool_name="compute_stability_derivatives", run_id=run_id,
+        session=session, session_id=session_id, surfaces=surfaces,
+        analysis_type="stability", inputs=inputs, results=results,
+        standard_detail=None, findings=findings,
+        t0=t0, cache_hit=False, run_name=run_name,
+        surface_dicts=surface_dicts, auto_plots=False,
     )
-
-    return make_envelope("compute_stability_derivatives", run_id, inputs, results, validation, telem)
 
 
 # ---------------------------------------------------------------------------
@@ -1157,32 +1157,15 @@ async def run_optimization(
         "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
         "density": density,
     }
-
     findings = validate_optimization(result, context={"analysis_type": analysis_type})
-    validation = findings_to_dict(findings)
-    elapsed = time.perf_counter() - t0
-    telem = make_telemetry(elapsed, False, len(surfaces))
-
-    results_to_save = {**result, "standard_detail": standard_detail}
-    conv_data = session.get_convergence(run_id)
-    if conv_data:
-        results_to_save["convergence"] = conv_data
-    _artifacts.save(
-        session_id=session_id,
-        analysis_type="optimization",
-        tool_name="run_optimization",
-        surfaces=surfaces,
-        parameters=inputs,
-        results=results_to_save,
-        user=get_current_user(),
-        project=session.project,
-        name=run_name,
-        validation=validation,
-        telemetry=telem,
-        run_id=run_id,
+    return await _finalize_analysis(
+        tool_name="run_optimization", run_id=run_id,
+        session=session, session_id=session_id, surfaces=surfaces,
+        analysis_type="optimization", inputs=inputs, results=result,
+        standard_detail=standard_detail, findings=findings,
+        t0=t0, cache_hit=False, run_name=run_name,
+        surface_dicts=surface_dicts, auto_plots=False,
     )
-
-    return make_envelope("run_optimization", run_id, inputs, result, validation, telem)
 
 
 # ---------------------------------------------------------------------------
@@ -1763,238 +1746,10 @@ async def set_requirements(
 # Resources — reference material the LLM can read on demand
 # ---------------------------------------------------------------------------
 
-_REFERENCE = """\
-# OpenAeroStruct MCP — quick reference
+from pathlib import Path as _Path
+_REFERENCE = (_Path(__file__).parent / "reference.md").read_text()
+_WORKFLOWS = (_Path(__file__).parent / "workflows.md").read_text()
 
-## Workflow order (mandatory)
-  create_surface → run_aero_analysis | run_aerostruct_analysis
-                 → compute_drag_polar | compute_stability_derivatives
-                 → run_optimization
-  reset  (clears all state)
-
-## create_surface — key parameters
-  name          str      Surface identifier used in all other tools
-  wing_type     str      "rect" (flat, no twist) | "CRM" (transport planform with twist)
-  span          float    Full wingspan in metres (default 10.0)
-  root_chord    float    Root chord in metres (default 1.0)
-  num_x         int      Chordwise nodes, >= 2 (default 2)
-  num_y         int      Spanwise nodes, ODD, >= 3 (default 7)
-  symmetry      bool     True = model half-span (recommended, default True)
-  sweep         float    Leading-edge sweep, degrees (default 0)
-  dihedral      float    Dihedral angle, degrees (default 0)
-  taper         float    Taper ratio tip/root chord (default 1.0 = no taper)
-  twist_cp      float[]  Twist control points, degrees, root-to-tip (None = zero twist)
-  t_over_c_cp   float[]  Thickness/chord control points, root-to-tip (default [0.15])
-  with_viscous  bool     Include viscous drag (default True)
-  with_wave     bool     Include wave drag (default False)
-  CD0           float    Zero-lift profile drag added to total (default 0.015)
-  fem_model_type str|None "tube" | "wingbox" | None  — enables structural analysis
-  E             float    Young's modulus, Pa (default 70e9 = Al 7075)
-  G             float    Shear modulus, Pa (default 30e9 = Al 7075)
-  yield_stress  float    Yield stress, Pa (default 500e6)
-  safety_factor float    Safety factor on yield (default 2.5)
-  mrho          float    Material density, kg/m³ (default 3000 = Al 7075)
-  thickness_cp  float[]  Tube thickness control points, m, root-to-tip (default 0.1*root_chord)
-  offset        float[3] [x,y,z] origin offset in metres (e.g. tail: [50,0,0])
-
-NOTE: All *_cp arrays use ROOT-to-TIP ordering: cp[0]=root, cp[-1]=tip.
-  Example: twist_cp=[-7, 0] → root=-7° (washed in), tip=0°.
-  Optimised DV arrays returned by run_optimization follow the same convention.
-
-## Typical flight conditions (cruise, ~FL350)
-  velocity=248.136 m/s  Mach_number=0.84  density=0.38 kg/m³
-  reynolds_number=1e6   speed_of_sound=295.4 m/s
-
-## run_aero_analysis — returns
-  CL, CD, CM, L_over_D
-  surfaces.{name}.{CL, CD, CDi, CDv, CDw}
-
-## run_aerostruct_analysis — returns (all of aero plus)
-  fuelburn kg, structural_mass kg, L_equals_W (residual, 0=trimmed)
-  surfaces.{name}.{failure, max_vonmises_Pa, structural_mass_kg}
-  failure < 0  →  safe;  failure > 0  →  structural failure
-
-## compute_drag_polar — returns
-  alpha_deg[], CL[], CD[], CM[], L_over_D[]
-  best_L_over_D.{alpha_deg, CL, CD, L_over_D}
-
-## compute_stability_derivatives — returns
-  CL_alpha (1/deg), CM_alpha (1/deg), static_margin, stability (string)
-  static_margin = -CM_alpha/CL_alpha;  positive = statically stable
-
-## run_optimization — design variable names
-  twist, thickness, chord, sweep, taper, alpha
-  spar_thickness, skin_thickness  (wingbox only)
-
-## run_optimization — constraint names
-  aero:        CL, CD, CM
-  aerostruct:  CL, CD, CM, failure, thickness_intersects, L_equals_W
-
-## run_optimization — objective names
-  aero:        CD, CL
-  aerostruct:  fuelburn, structural_mass, CD
-
-## Artifact storage (automatic)
-  Every analysis tool saves a run_id.  Use it to retrieve results later.
-  Storage layout: {OAS_DATA_DIR}/{user}/{project}/{session_id}/{run_id}.json
-  OAS_DATA_DIR env var controls storage root (default: ./oas_data/)
-  OAS_USER env var sets user identity (default: OS login name)
-  OAS_PROJECT env var sets default project per session (default: "default")
-  Pass run_name="label" to tag a run; visible in list_artifacts output.
-  list_artifacts(session_id?, analysis_type?, user?, project?)  list saved runs
-  get_artifact(run_id, session_id?)             full metadata + results
-  get_artifact_summary(run_id, session_id?)     metadata only (no payload)
-  delete_artifact(run_id, session_id?)          remove permanently
-  oas://artifacts/{run_id}                      resource access by run_id
-
-## Common errors and fixes
-  "num_y must be odd"           → change num_y to nearest odd number
-  "missing structural props"    → re-create surface with fem_model_type="tube"
-  "Surface not found"           → call create_surface first with that exact name
-  "Unknown design variable"     → check spelling against the DV list above
-"""
-
-_WORKFLOWS = """\
-# OpenAeroStruct MCP — step-by-step workflows
-
----
-## Workflow A — aerodynamic analysis of a new wing
-
-Goal: characterise CL, CD, L/D of a wing at cruise.
-
-Step 1 — define the geometry:
-  create_surface(
-      name="wing", wing_type="CRM",
-      num_x=2, num_y=7, symmetry=True,
-      with_viscous=True, CD0=0.015
-  )
-
-Step 2 — single-point cruise analysis:
-  run_aero_analysis(
-      surfaces=["wing"],
-      velocity=248.136, alpha=5.0,
-      Mach_number=0.84, density=0.38
-  )
-
-Step 3 — drag polar to find best L/D:
-  compute_drag_polar(
-      surfaces=["wing"],
-      alpha_start=0.0, alpha_end=12.0, num_alpha=13,
-      Mach_number=0.84, density=0.38
-  )
-  → inspect best_L_over_D to find operating point
-
-Step 4 (optional) — stability check:
-  compute_stability_derivatives(
-      surfaces=["wing"],
-      alpha=5.0, Mach_number=0.84, density=0.38,
-      cg=[<x_cg>, 0, 0]   # x_cg in metres from leading edge
-  )
-
----
-## Workflow B — aerostructural sizing
-
-Goal: check whether a wing structure can carry the aerodynamic loads at cruise,
-and compute mission fuel burn.
-
-Step 1 — define wing with structural properties:
-  create_surface(
-      name="wing", wing_type="CRM",
-      num_x=2, num_y=7, symmetry=True,
-      with_viscous=True, CD0=0.015,
-      fem_model_type="tube",
-      E=70e9, G=30e9, yield_stress=500e6, safety_factor=2.5, mrho=3000.0
-  )
-
-Step 2 — coupled aerostructural analysis:
-  run_aerostruct_analysis(
-      surfaces=["wing"],
-      velocity=248.136, alpha=5.0,
-      Mach_number=0.84, density=0.38,
-      W0=120000,         # aircraft empty weight excl. wing, kg
-      R=11.165e6,        # mission range, m
-      speed_of_sound=295.4, load_factor=1.0
-  )
-
-Step 3 — interpret results:
-  • failure < 0  →  structure is safe at this load
-  • failure > 0  →  increase thickness_cp values or reduce load_factor
-  • L_equals_W ≈ 0  →  wing is sized for aircraft weight; large residual means
-    alpha or W0 needs adjustment
-  • fuelburn / structural_mass are the primary sizing metrics
-
----
-## Workflow C — aerodynamic optimisation
-
-Goal: minimise drag at a fixed lift coefficient by varying twist and alpha.
-
-Step 1 — define geometry (aero-only surface is fine):
-  create_surface(
-      name="wing", wing_type="CRM",
-      num_x=2, num_y=7, symmetry=True,
-      with_viscous=True, CD0=0.015
-  )
-
-Step 2 — run optimisation:
-  run_optimization(
-      surfaces=["wing"],
-      analysis_type="aero",
-      objective="CD",
-      design_variables=[
-          {"name": "twist", "lower": -10.0, "upper": 15.0},
-          {"name": "alpha", "lower": -5.0,  "upper": 15.0}
-      ],
-      constraints=[{"name": "CL", "equals": 0.5}],
-      Mach_number=0.84, density=0.38
-  )
-
-Step 3 — check result:
-  • success=True and final_results.CL ≈ 0.5  →  converged
-  • success=False  →  try wider DV bounds or a different starting alpha
-
----
-## Workflow D — aerostructural optimisation (minimum fuel burn)
-
-Step 1 — define wing with structural properties (see Workflow B, Step 1)
-
-Step 2:
-  run_optimization(
-      surfaces=["wing"],
-      analysis_type="aerostruct",
-      objective="fuelburn",
-      design_variables=[
-          {"name": "twist",     "lower": -10.0, "upper": 15.0},
-          {"name": "thickness", "lower":  0.003, "upper": 0.25,  "scaler": 1e2},
-          {"name": "alpha",     "lower":  -5.0,  "upper": 10.0}
-      ],
-      constraints=[
-          {"name": "L_equals_W",  "equals": 0.0},
-          {"name": "failure",     "upper":  0.0},
-          {"name": "thickness_intersects", "upper": 0.0}
-      ],
-      W0=120000, R=11.165e6, Mach_number=0.84, density=0.38
-  )
-
----
-## Workflow E — multi-surface (wing + tail)
-
-Step 1 — create both surfaces:
-  create_surface(name="wing", wing_type="CRM", num_x=2, num_y=7, ...)
-  create_surface(name="tail", wing_type="rect", span=6.0, root_chord=1.5,
-                 num_x=2, num_y=5, offset=[20.0, 0.0, 0.0],
-                 CD0=0.0, CL0=0.0)
-
-Step 2 — analyse both together:
-  run_aero_analysis(surfaces=["wing", "tail"], ...)
-  compute_drag_polar(surfaces=["wing", "tail"], ...)
-
-  Trimmed stability (CM=0) requires adjusting the tail incidence angle
-  (twist_cp on the tail) until CM ≈ 0 at the desired operating CL.
-
-NOTE: All *_cp arrays (twist_cp, chord_cp, thickness_cp, etc.) are ordered
-  ROOT-to-TIP: cp[0]=root, cp[-1]=tip.  This applies to both inputs and the
-  optimized_design_variables output from run_optimization.
-"""
 
 
 @mcp.resource("oas://reference", description="Parameter reference for all OAS MCP tools")
