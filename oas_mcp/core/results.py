@@ -162,9 +162,12 @@ def extract_standard_detail(
         mesh = surface.get("mesh")
         if mesh is not None:
             y_coords = np.asarray(mesh[0, :, 1]).ravel()
-            y_min, y_max = float(y_coords.min()), float(y_coords.max())
-            span_half = max(abs(y_max - y_min), 1e-12)
-            y_norm = ((y_coords - y_min) / span_half).tolist()
+            # OAS symmetric meshes span y ∈ [-b/2, 0] (left half-span), so
+            # node 0 is the TIP and node ny-1 is the ROOT.  Using |y|/max(|y|)
+            # gives η=0 at root and η=1 at tip, matching the axis label.
+            y_abs = np.abs(y_coords)
+            span_half = max(float(y_abs.max()), 1e-12)
+            y_norm = (y_abs / span_half).tolist()
             sect["y_span_norm"] = y_norm
 
             # Mesh snapshot: leading/trailing edge for planform plot
