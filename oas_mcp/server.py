@@ -45,6 +45,7 @@ from .core.envelope import make_envelope, make_error_envelope
 from .core.errors import OASMCPError, UserInputError, SolverConvergenceError
 from .core.mesh import apply_dihedral, apply_sweep, apply_taper, build_mesh
 from .core.plotting import PLOT_TYPES, generate_plot
+from .core.widget import DASHBOARD_HTML, extract_plot_data
 from .core.requirements import check_requirements
 from .core.results import (
     extract_aero_results,
@@ -165,6 +166,24 @@ workflows, and the resources (oas://reference, oas://workflows) for quick lookup
 
 _sessions = SessionManager()
 _artifacts = ArtifactStore()
+
+# ---------------------------------------------------------------------------
+# MCP Apps widget resource
+# ---------------------------------------------------------------------------
+
+_WIDGET_URI = "ui://oas/dashboard.html"
+
+
+@mcp.resource(
+    _WIDGET_URI,
+    name="OAS Dashboard",
+    description="Interactive OpenAeroStruct dashboard (MCP Apps widget)",
+    mime_type="text/html;profile=mcp-app",
+    meta={"ui": {"csp": {"resourceDomains": ["https://cdn.plot.ly", "https://unpkg.com"]}}},
+)
+def oas_dashboard_view() -> str:
+    """Return the embedded dashboard HTML for MCP Apps hosts."""
+    return DASHBOARD_HTML
 
 
 def _suppress_output(func, *args, **kwargs):
@@ -1377,7 +1396,7 @@ async def get_detailed_results(
         )
 
 
-@mcp.tool()
+@mcp.tool(meta={"ui": {"resourceUri": _WIDGET_URI}})
 async def visualize(
     run_id: Annotated[str, "Run ID to visualize"],
     plot_type: Annotated[
@@ -1468,6 +1487,11 @@ async def visualize(
     plot_result = await asyncio.to_thread(
         generate_plot,
         plot_type, run_id, plot_results, conv_data, mesh_data, case_name, opt_history,
+    )
+    # Attach structured plot data so MCP Apps widget can render interactive Plotly charts.
+    # Text/image clients (Claude) are unaffected — they use the PNG image as before.
+    plot_result.metadata["plot_data"] = extract_plot_data(
+        plot_type, plot_results, conv_data, mesh_data, opt_history
     )
     return [plot_result.metadata, plot_result.image]
 
