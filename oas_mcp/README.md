@@ -761,14 +761,14 @@ Defines a lifting surface and stores it in the session. Must be called before an
 | `num_x` | int | `2` | Chordwise mesh nodes (≥ 2) |
 | `num_y` | int | `7` | Spanwise mesh nodes (must be **odd**, ≥ 3) |
 | `symmetry` | bool | `True` | Model half-span (recommended) |
-| `twist_cp` | float[] | `None` | Twist control-point values in degrees |
-| `t_over_c_cp` | float[] | `[0.15]` | Thickness-to-chord ratio control points |
+| `twist_cp` | float[] | `None` | Twist control-point values in degrees **(root-to-tip: cp[0]=root, cp[-1]=tip)** |
+| `t_over_c_cp` | float[] | `[0.15]` | Thickness-to-chord ratio control points **(root-to-tip)** |
 | `CL0` | float | `0.0` | Profile CL at α=0 |
 | `CD0` | float | `0.015` | Zero-lift profile drag |
 | `with_viscous` | bool | `True` | Include viscous drag |
 | `with_wave` | bool | `False` | Include wave drag |
 | `fem_model_type` | str | `None` | `"tube"`, `"wingbox"`, or `None` for aero-only |
-| `thickness_cp` | float[] | `None` | Tube wall thickness control points in metres |
+| `thickness_cp` | float[] | `None` | Tube wall thickness control points in metres **(root-to-tip)** |
 | `E` | float | `70e9` | Young's modulus in Pa |
 | `G` | float | `30e9` | Shear modulus in Pa |
 | `yield_stress` | float | `500e6` | Yield stress in Pa |
@@ -779,6 +779,8 @@ Defines a lifting surface and stores it in the session. Must be called before an
 **Returns:** `{surface_name, mesh_shape, span_m, mean_chord_m, estimated_area_m2, twist_cp_shape, has_structure, status}`
 
 > **Note on `num_y`:** OpenAeroStruct requires an odd number of spanwise nodes. If you pass an even value the tool raises a `ValueError` and suggests the nearest valid options.
+
+> **Note on `*_cp` ordering:** All control-point arrays (`twist_cp`, `chord_cp`, `t_over_c_cp`, `thickness_cp`, `spar_thickness_cp`, `skin_thickness_cp`) use **root-to-tip** ordering: `cp[0]` = root value, `cp[-1]` = tip value. Example: `twist_cp=[-7, 0]` means root=−7° (washed in), tip=0°. Optimised DV arrays returned by `run_optimization` follow the same convention.
 
 ---
 

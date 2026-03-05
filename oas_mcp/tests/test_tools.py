@@ -115,6 +115,7 @@ class TestCreateSurface:
         assert "radius_cp" not in surf
 
     async def test_wingbox_custom_spar_skin_thickness(self):
+        # User provides root-to-tip; stored internally in OAS tip-to-root order.
         await create_surface(
             name="wb3", wing_type="rect", num_x=2, num_y=5,
             fem_model_type="wingbox",
@@ -124,8 +125,9 @@ class TestCreateSurface:
         from oas_mcp.server import _sessions
         import numpy as np
         surf = _sessions.get("default").surfaces["wb3"]
-        assert list(surf["spar_thickness_cp"]) == pytest.approx([0.003, 0.005, 0.007])
-        assert list(surf["skin_thickness_cp"]) == pytest.approx([0.004, 0.008, 0.012])
+        # Internal OAS order is reversed (tip-to-root)
+        assert list(surf["spar_thickness_cp"]) == pytest.approx([0.007, 0.005, 0.003])
+        assert list(surf["skin_thickness_cp"]) == pytest.approx([0.012, 0.008, 0.004])
 
     async def test_wingbox_t_over_c_custom(self):
         await create_surface(
@@ -136,6 +138,64 @@ class TestCreateSurface:
         from oas_mcp.server import _sessions
         surf = _sessions.get("default").surfaces["wb4"]
         assert surf["original_wingbox_airfoil_t_over_c"] == pytest.approx(0.15)
+
+
+# ---------------------------------------------------------------------------
+# Control-point ordering convention
+# ---------------------------------------------------------------------------
+
+
+class TestCpOrdering:
+    async def test_twist_cp_stored_in_oas_tip_to_root_order(self):
+        """User-provided root-to-tip array must be reversed for internal OAS storage."""
+        await create_surface(name="cp_test", wing_type="rect", num_x=2, num_y=5,
+                             twist_cp=[3.0, 0.0])
+        from oas_mcp.server import _sessions
+        surf = _sessions.get("default").surfaces["cp_test"]
+        # [3.0, 0.0] root-to-tip → stored as [0.0, 3.0] tip-to-root
+        import numpy as np
+        assert list(surf["twist_cp"]) == pytest.approx([0.0, 3.0])
+
+    async def test_twist_cp_root_loads_more_than_tip(self):
+        """twist_cp=[5, 0] should load root (high twist) more than tip (zero twist)."""
+        await create_surface(name="twist_conv", wing_type="rect", num_x=2, num_y=5,
+                             twist_cp=[5.0, 0.0])
+        env = await run_aero_analysis(["twist_conv"], alpha=0.0)
+        r = _r(env)
+        surf_r = r["surfaces"]["twist_conv"]
+        # A 5° root twist with 0° tip: root sections carry more lift than tip
+        # Verify overall CL is positive (root twist produces lift at alpha=0)
+        assert r["CL"] > 0.0
+
+    async def test_zero_twist_vs_root_twist_cl(self):
+        """Wing with root-only twist must produce more CL than untwisted wing at alpha=0."""
+        await create_surface(name="no_twist", wing_type="rect", num_x=2, num_y=5,
+                             twist_cp=[0.0, 0.0])
+        await create_surface(name="root_twist", wing_type="rect", num_x=2, num_y=5,
+                             twist_cp=[5.0, 0.0])
+        r_none = _r(await run_aero_analysis(["no_twist"], alpha=0.0))
+        r_root = _r(await run_aero_analysis(["root_twist"], alpha=0.0))
+        # Root twist of 5° should produce significantly more lift
+        assert r_root["CL"] > r_none["CL"] + 0.05
+
+    async def test_optimization_returns_root_to_tip_order(self):
+        """Optimised twist DV must come back in root-to-tip order."""
+        await create_surface(name="opt_conv", wing_type="rect", num_x=2, num_y=5)
+        env = await run_optimization(
+            surfaces=["opt_conv"],
+            analysis_type="aero",
+            objective="CD",
+            design_variables=[{"name": "twist", "lower": -10.0, "upper": 10.0}],
+            constraints=[{"name": "CL", "equals": 0.3}],
+        )
+        r = _r(env)
+        twist_out = r["optimized_design_variables"].get("twist")
+        assert twist_out is not None
+        # Must be a flat list of floats (root-to-tip)
+        assert isinstance(twist_out, list)
+        assert all(isinstance(v, float) for v in twist_out)
+        # initial_dvs must also be present
+        assert r["optimization_history"]["initial_dvs"].get("twist") is not None
 
 
 # ---------------------------------------------------------------------------

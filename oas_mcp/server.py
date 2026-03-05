@@ -131,6 +131,12 @@ PARAMETER TIPS:
   • failure > 1.0 means structural failure (utilisation ratio > 1); failure < 1.0 = OK
   • L_equals_W residual near 0 means the wing is sized to carry the aircraft weight
 
+CONTROL-POINT ORDERING:
+  • All *_cp arrays (twist_cp, chord_cp, thickness_cp, etc.) are ordered ROOT-to-TIP:
+    cp[0] = root value, cp[-1] = tip value.
+  • Example: twist_cp=[-7, 0] means root=-7° (washed in), tip=0° — correct washout.
+  • Optimised DV arrays returned by run_optimization use the same root-to-tip ordering.
+
 PERFORMANCE:
   • The first run_aero_analysis call builds and sets up the OpenMDAO problem (~0.1 s).
     Subsequent calls with the same surfaces reuse the cached problem — only the flight
@@ -250,6 +256,35 @@ async def _apply_auto_plots(
 
 
 # ---------------------------------------------------------------------------
+# Control-point ordering helpers
+# ---------------------------------------------------------------------------
+# All *_cp arrays at the MCP boundary are ordered ROOT-to-TIP (standard
+# aerospace convention: cp[0]=root, cp[-1]=tip).  OAS internally uses
+# TIP-to-ROOT ordering (cp[0]=tip, cp[-1]=root).  These helpers convert.
+
+_CP_KEYS = frozenset({
+    "twist_cp", "chord_cp", "t_over_c_cp", "thickness_cp",
+    "spar_thickness_cp", "skin_thickness_cp",
+})
+
+
+def _to_oas_order(arr):
+    """Root-to-tip (MCP user convention) → tip-to-root (OAS internal)."""
+    return arr[::-1].copy()
+
+
+def _from_oas_order(arr):
+    """Tip-to-root (OAS internal) → root-to-tip (MCP user convention)."""
+    return arr[::-1].copy()
+
+
+def _is_cp_dv(name: str) -> bool:
+    """Return True if *name* refers to a spanwise control-point DV array."""
+    # DV names passed by users omit the _cp suffix (e.g. "twist", "thickness")
+    return (name + "_cp") in _CP_KEYS or name in _CP_KEYS
+
+
+# ---------------------------------------------------------------------------
 # Tool 1 — create_surface
 # ---------------------------------------------------------------------------
 
@@ -266,17 +301,17 @@ async def create_surface(
     num_x: Annotated[int, "Number of chordwise mesh nodes (>= 2)"] = 2,
     num_y: Annotated[int, "Number of spanwise mesh nodes (must be odd, >= 3)"] = 7,
     symmetry: Annotated[bool, "If True, model only one half of the wing"] = True,
-    twist_cp: Annotated[list[float] | None, "Twist control-point values in degrees (None = zero twist)"] = None,
-    chord_cp: Annotated[list[float] | None, "Chord control-point scale factors (None = unit chord)"] = None,
-    t_over_c_cp: Annotated[list[float] | None, "Thickness-to-chord ratio control points (None = [0.15])"] = None,
+    twist_cp: Annotated[list[float] | None, "Twist control-point values in degrees, ordered root-to-tip (None = zero twist)"] = None,
+    chord_cp: Annotated[list[float] | None, "Chord control-point scale factors, ordered root-to-tip (None = unit chord)"] = None,
+    t_over_c_cp: Annotated[list[float] | None, "Thickness-to-chord ratio control points, ordered root-to-tip (None = [0.15])"] = None,
     CL0: Annotated[float, "Lift coefficient at alpha=0 (profile)"] = 0.0,
     CD0: Annotated[float, "Zero-lift drag coefficient (profile)"] = 0.015,
     with_viscous: Annotated[bool, "Include viscous (skin-friction) drag"] = True,
     with_wave: Annotated[bool, "Include wave drag"] = False,
     fem_model_type: Annotated[str | None, "Structural model: 'tube', 'wingbox', or None for aero-only"] = None,
-    thickness_cp: Annotated[list[float] | None, "Tube wall thickness control points in metres (tube model only)"] = None,
-    spar_thickness_cp: Annotated[list[float] | None, "Wingbox spar thickness control points in metres (wingbox model only)"] = None,
-    skin_thickness_cp: Annotated[list[float] | None, "Wingbox skin thickness control points in metres (wingbox model only)"] = None,
+    thickness_cp: Annotated[list[float] | None, "Tube wall thickness control points in metres, ordered root-to-tip (tube model only)"] = None,
+    spar_thickness_cp: Annotated[list[float] | None, "Wingbox spar thickness control points in metres, ordered root-to-tip (wingbox model only)"] = None,
+    skin_thickness_cp: Annotated[list[float] | None, "Wingbox skin thickness control points in metres, ordered root-to-tip (wingbox model only)"] = None,
     original_wingbox_airfoil_t_over_c: Annotated[float, "Thickness-to-chord ratio of the reference airfoil used for wingbox cross-section geometry (wingbox model only)"] = 0.12,
     E: Annotated[float, "Young's modulus in Pa (default: aluminium 7075, 70 GPa)"] = 70.0e9,
     G: Annotated[float, "Shear modulus in Pa (default: aluminium 7075, 30 GPa)"] = 30.0e9,
@@ -323,8 +358,10 @@ async def create_surface(
             mesh = apply_taper(mesh, taper)
 
         # Determine twist_cp
+        # User-provided arrays are root-to-tip; reverse to OAS tip-to-root.
+        # CRM twist from generate_mesh() is already in OAS order — do NOT reverse.
         if twist_cp is not None:
-            tcp = np.array(twist_cp, dtype=float)
+            tcp = _to_oas_order(np.array(twist_cp, dtype=float))
         elif crm_twist is not None:
             tcp = crm_twist
         else:
@@ -340,14 +377,18 @@ async def create_surface(
             "CL0": CL0,
             "CD0": CD0,
             "k_lam": 0.05,
-            "t_over_c_cp": np.array(t_over_c_cp if t_over_c_cp else [0.15]),
+            "t_over_c_cp": (
+                _to_oas_order(np.array(t_over_c_cp, dtype=float))
+                if t_over_c_cp is not None
+                else np.array([0.15])
+            ),
             "c_max_t": 0.303,
             "with_viscous": with_viscous,
             "with_wave": with_wave,
         }
 
         if chord_cp is not None:
-            surface["chord_cp"] = np.array(chord_cp, dtype=float)
+            surface["chord_cp"] = _to_oas_order(np.array(chord_cp, dtype=float))
 
         if fem_model_type and fem_model_type != "none":
             surface["fem_model_type"] = fem_model_type
@@ -367,12 +408,12 @@ async def create_surface(
                 ny2 = (num_y + 1) // 2
                 n_cp = max(2, min(6, ny2 // 2))
                 surface["spar_thickness_cp"] = (
-                    np.array(spar_thickness_cp, dtype=float)
+                    _to_oas_order(np.array(spar_thickness_cp, dtype=float))
                     if spar_thickness_cp is not None
                     else np.linspace(0.004, 0.01, n_cp)
                 )
                 surface["skin_thickness_cp"] = (
-                    np.array(skin_thickness_cp, dtype=float)
+                    _to_oas_order(np.array(skin_thickness_cp, dtype=float))
                     if skin_thickness_cp is not None
                     else np.linspace(0.005, 0.026, n_cp)
                 )
@@ -386,7 +427,7 @@ async def create_surface(
             else:
                 # Tube model thickness control points
                 if thickness_cp is not None:
-                    surface["thickness_cp"] = np.array(thickness_cp, dtype=float)
+                    surface["thickness_cp"] = _to_oas_order(np.array(thickness_cp, dtype=float))
                 else:
                     ny2 = (num_y + 1) // 2
                     n_cp = max(3, min(5, ny2 // 2))
@@ -1084,6 +1125,19 @@ async def run_optimization(
             except Exception:
                 pass
 
+        # Convert cp arrays from OAS order (tip→root) to MCP order (root→tip)
+        for dv_name in list(dv_results):
+            if _is_cp_dv(dv_name):
+                dv_results[dv_name] = _from_oas_order(np.array(dv_results[dv_name])).tolist()
+        for dv_name in list(initial_dvs):
+            if _is_cp_dv(dv_name):
+                initial_dvs[dv_name] = _from_oas_order(np.array(initial_dvs[dv_name])).tolist()
+        for dv_name, iters in opt_history.get("dv_history", {}).items():
+            if _is_cp_dv(dv_name):
+                opt_history["dv_history"][dv_name] = [
+                    _from_oas_order(np.array(v)).tolist() for v in iters
+                ]
+
         result = {
             "success": bool(success),
             "optimized_design_variables": dv_results,
@@ -1729,8 +1783,8 @@ _REFERENCE = """\
   sweep         float    Leading-edge sweep, degrees (default 0)
   dihedral      float    Dihedral angle, degrees (default 0)
   taper         float    Taper ratio tip/root chord (default 1.0 = no taper)
-  twist_cp      float[]  Twist control points, degrees (None = zero twist)
-  t_over_c_cp   float[]  Thickness/chord control points (default [0.15])
+  twist_cp      float[]  Twist control points, degrees, root-to-tip (None = zero twist)
+  t_over_c_cp   float[]  Thickness/chord control points, root-to-tip (default [0.15])
   with_viscous  bool     Include viscous drag (default True)
   with_wave     bool     Include wave drag (default False)
   CD0           float    Zero-lift profile drag added to total (default 0.015)
@@ -1740,8 +1794,12 @@ _REFERENCE = """\
   yield_stress  float    Yield stress, Pa (default 500e6)
   safety_factor float    Safety factor on yield (default 2.5)
   mrho          float    Material density, kg/m³ (default 3000 = Al 7075)
-  thickness_cp  float[]  Tube thickness control points, m (default 0.1*root_chord)
+  thickness_cp  float[]  Tube thickness control points, m, root-to-tip (default 0.1*root_chord)
   offset        float[3] [x,y,z] origin offset in metres (e.g. tail: [50,0,0])
+
+NOTE: All *_cp arrays use ROOT-to-TIP ordering: cp[0]=root, cp[-1]=tip.
+  Example: twist_cp=[-7, 0] → root=-7° (washed in), tip=0°.
+  Optimised DV arrays returned by run_optimization follow the same convention.
 
 ## Typical flight conditions (cruise, ~FL350)
   velocity=248.136 m/s  Mach_number=0.84  density=0.38 kg/m³
@@ -1932,6 +1990,10 @@ Step 2 — analyse both together:
 
   Trimmed stability (CM=0) requires adjusting the tail incidence angle
   (twist_cp on the tail) until CM ≈ 0 at the desired operating CL.
+
+NOTE: All *_cp arrays (twist_cp, chord_cp, thickness_cp, etc.) are ordered
+  ROOT-to-TIP: cp[0]=root, cp[-1]=tip.  This applies to both inputs and the
+  optimized_design_variables output from run_optimization.
 """
 
 

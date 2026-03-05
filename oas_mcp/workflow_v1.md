@@ -754,6 +754,8 @@ run_optimization({
   check that constraints are satisfied: CL = 0.5001 ≈ 0.50 ✓.
 - The `optimized_design_variables` block shows the final DV values.  For `twist`,
   the 5-element array matches the `twist_cp_shape` returned by `create_surface`.
+  The array is ordered **root-to-tip**: `twist[0]` = root, `twist[-1]` = tip.
+  The same root-to-tip convention applies to all `*_cp` inputs and outputs.
 - The optimizer uses gradient information (adjoint via OpenMDAO).  Gradient-based
   optimisation is fast (~seconds for small meshes) but finds local optima.  If you
   suspect a poor local minimum, try different starting points.
