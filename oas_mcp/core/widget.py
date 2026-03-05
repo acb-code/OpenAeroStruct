@@ -115,6 +115,7 @@ def _extract_drag_polar(results: dict) -> dict:
         "y": list(CLs),
         "name": "Drag Polar (CL vs CD)",
         "mode": "lines+markers",
+        "xaxis": "x",
         "yaxis": "y1",
     })
     if best and best.get("CL") is not None and best.get("CD") is not None:
@@ -125,6 +126,7 @@ def _extract_drag_polar(results: dict) -> dict:
             "name": f"Best L/D = {best.get('L_over_D', 0):.2f}",
             "mode": "markers",
             "marker": {"size": 12, "symbol": "star", "color": "red"},
+            "xaxis": "x",
             "yaxis": "y1",
         })
 
@@ -137,6 +139,7 @@ def _extract_drag_polar(results: dict) -> dict:
             "y": list(ld_vals),
             "name": "L/D vs α",
             "mode": "lines+markers",
+            "xaxis": "x2",
             "yaxis": "y2",
         })
 
@@ -144,7 +147,8 @@ def _extract_drag_polar(results: dict) -> dict:
         "type": "drag_polar",
         "interactive": True,
         "traces": traces,
-        "xaxis": {"title": "CD  [—]  /  α [deg]"},
+        "xaxis": {"title": "CD  [—]"},
+        "xaxis2": {"title": "α  [deg]", "overlaying": "x", "side": "top"},
         "yaxis": {"title": "CL  [—]"},
         "yaxis2": {"title": "L/D  [—]", "overlaying": "y", "side": "right"},
         "title": "Drag Polar",
@@ -642,6 +646,7 @@ function buildTraces(specs) {
   return specs.filter(s => s.kind !== 'hline').map(s => {
     const t = {
       x: s.x, y: s.y, name: s.name,
+      xaxis: s.xaxis || 'x',
       yaxis: s.yaxis || 'y',
       showlegend: s.showlegend !== false,
     };
@@ -669,17 +674,21 @@ function buildShapes(specs) {
 function renderPlotly(plotData, dualAxis) {
   const el = document.getElementById('chart');
   el.style.height = '360px';
+  const hasDualX = !!plotData.xaxis2;
   const layout = {
     title:  { text: plotData.title || '', font: { size: 13 } },
     xaxis:  plotData.xaxis || {},
     yaxis:  plotData.yaxis || {},
     shapes: buildShapes(plotData.traces || []),
-    margin: { t: 46, b: 56, l: 56, r: dualAxis ? 60 : 16 },
+    margin: { t: hasDualX ? 66 : 46, b: 56, l: 56, r: dualAxis ? 60 : 16 },
     autosize: true,
     ...plotlyColors(),
   };
   if (dualAxis && plotData.yaxis2) {
     layout.yaxis2 = { ...plotData.yaxis2, overlaying: 'y', side: 'right' };
+  }
+  if (hasDualX) {
+    layout.xaxis2 = { ...plotData.xaxis2, overlaying: 'x', side: 'top' };
   }
   Plotly.newPlot(el, buildTraces(plotData.traces || []), layout,
     { responsive: true, displayModeBar: true, displaylogo: false });
