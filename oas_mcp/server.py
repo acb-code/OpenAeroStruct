@@ -8,8 +8,7 @@ to a thread pool via asyncio.to_thread() so the event loop stays responsive.
 from __future__ import annotations
 
 # Load .env before any module-level env var reads.
-# auth.py reads KEYCLOAK_ISSUER_URL at import time, and FastMCP() is
-# constructed at module level — both must happen after dotenv runs.
+# FastMCP() is constructed at module level — dotenv must run first.
 try:
     from dotenv import load_dotenv as _load_dotenv
     _load_dotenv()
@@ -2065,7 +2064,9 @@ def _warn_if_unauthenticated(host: str, port: int) -> None:
     """Print a loud warning to stderr when HTTP transport runs without auth."""
     import sys
 
-    from .core.auth import KEYCLOAK_ISSUER_URL
+    import os
+
+    KEYCLOAK_ISSUER_URL = os.environ.get("KEYCLOAK_ISSUER_URL", "")
 
     if KEYCLOAK_ISSUER_URL:
         print(

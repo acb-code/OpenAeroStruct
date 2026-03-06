@@ -23,7 +23,10 @@ from __future__ import annotations
 import contextvars
 import getpass
 import os
+import threading
 from typing import Any
+
+from oas_mcp.core.telemetry import logger
 
 # Contextvar that holds the authenticated username for the current async request.
 # Set by KeycloakTokenVerifier.verify_token() on each successful JWT validation.
@@ -31,10 +34,8 @@ _current_user_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_current_user_ctx", default=""
 )
 
-KEYCLOAK_ISSUER_URL: str = os.environ.get("KEYCLOAK_ISSUER_URL", "")
-KEYCLOAK_CLIENT_ID: str = os.environ.get("KEYCLOAK_CLIENT_ID", "oas-mcp")
-KEYCLOAK_CLIENT_SECRET: str = os.environ.get("KEYCLOAK_CLIENT_SECRET", "")
-RESOURCE_SERVER_URL: str = os.environ.get("RESOURCE_SERVER_URL", "http://localhost:8000")
+# Environment variables are read inside build_auth_settings() / build_token_verifier()
+# so that changes made after module import (e.g., in test fixtures) are picked up.
 
 
 class KeycloakTokenVerifier:
@@ -65,18 +66,20 @@ class KeycloakTokenVerifier:
         self._client_id = client_id
         self._client_secret = client_secret
         self._jwks_client: Any = None  # jwt.PyJWKClient, imported lazily
+        self._jwks_lock = threading.Lock()
 
     def _get_jwks_client(self) -> Any:
-        if self._jwks_client is None:
-            try:
-                import jwt  # PyJWT
-            except ImportError as exc:
-                raise ImportError(
-                    "PyJWT[crypto] is required for Keycloak auth. "
-                    "Install it with: pip install 'openaerostruct[http]'"
-                ) from exc
-            jwks_uri = f"{self._issuer_url}/protocol/openid-connect/certs"
-            self._jwks_client = jwt.PyJWKClient(jwks_uri)
+        with self._jwks_lock:
+            if self._jwks_client is None:
+                try:
+                    import jwt  # PyJWT
+                except ImportError as exc:
+                    raise ImportError(
+                        "PyJWT[crypto] is required for Keycloak auth. "
+                        "Install it with: pip install 'openaerostruct[http]'"
+                    ) from exc
+                jwks_uri = f"{self._issuer_url}/protocol/openid-connect/certs"
+                self._jwks_client = jwt.PyJWKClient(jwks_uri)
         return self._jwks_client
 
     def verify(self, token: str) -> dict[str, Any]:
@@ -107,9 +110,23 @@ class KeycloakTokenVerifier:
         import asyncio
         from mcp.server.auth.provider import AccessToken
 
+        # Reset contextvar at the start of each request so a previously
+        # authenticated identity never leaks into a subsequent failing request.
+        _current_user_ctx.set("")
+
         try:
             claims = await asyncio.to_thread(self.verify, token)
         except Exception:
+            logger.warning("Token verification failed", exc_info=True)
+            return None
+
+        # Scope check: reject tokens that don't include the required mcp:tools scope.
+        token_scopes = claims.get("scope", "").split()
+        if "mcp:tools" not in token_scopes:
+            logger.warning(
+                "Token rejected: missing required scope 'mcp:tools' (got: %r)",
+                token_scopes,
+            )
             return None
 
         # Store the username in the contextvar so get_current_user() can read it
@@ -120,7 +137,7 @@ class KeycloakTokenVerifier:
         return AccessToken(
             token=token,
             client_id=claims.get("azp") or claims.get("client_id", self._client_id),
-            scopes=claims.get("scope", "").split(),
+            scopes=token_scopes,
             expires_at=claims.get("exp"),
         )
 
@@ -146,25 +163,28 @@ def build_auth_settings() -> Any:
 
     Returns ``None`` if ``KEYCLOAK_ISSUER_URL`` is not set (auth disabled).
     """
-    if not KEYCLOAK_ISSUER_URL:
+    issuer_url = os.environ.get("KEYCLOAK_ISSUER_URL", "")
+    if not issuer_url:
         return None
     try:
         from mcp.server.auth.settings import AuthSettings  # type: ignore[import]
     except ImportError:
         return None
+    resource_server_url = os.environ.get("RESOURCE_SERVER_URL", "http://localhost:8000")
     return AuthSettings(
-        issuer_url=KEYCLOAK_ISSUER_URL,
+        issuer_url=issuer_url,
         required_scopes=["mcp:tools"],
-        resource_server_url=RESOURCE_SERVER_URL,
+        resource_server_url=resource_server_url,
     )
 
 
 def build_token_verifier() -> KeycloakTokenVerifier | None:
     """Return a :class:`KeycloakTokenVerifier` if ``KEYCLOAK_ISSUER_URL`` is set."""
-    if not KEYCLOAK_ISSUER_URL:
+    issuer_url = os.environ.get("KEYCLOAK_ISSUER_URL", "")
+    if not issuer_url:
         return None
     return KeycloakTokenVerifier(
-        issuer_url=KEYCLOAK_ISSUER_URL,
-        client_id=KEYCLOAK_CLIENT_ID,
-        client_secret=KEYCLOAK_CLIENT_SECRET,
+        issuer_url=issuer_url,
+        client_id=os.environ.get("KEYCLOAK_CLIENT_ID", "oas-mcp"),
+        client_secret=os.environ.get("KEYCLOAK_CLIENT_SECRET", ""),
     )
