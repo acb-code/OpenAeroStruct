@@ -1,5 +1,7 @@
 # Optimize Wing
 
+> This workflow is also available as the MCP prompt `optimize_wing`.
+
 Run a wing design optimization using the OpenAeroStruct MCP server.
 
 ## Steps

@@ -1,5 +1,7 @@
 # Compare Designs
 
+> This workflow is also available as the MCP prompt `compare_designs`.
+
 Compare two OAS analysis runs side by side using run_ids.
 
 ## Steps

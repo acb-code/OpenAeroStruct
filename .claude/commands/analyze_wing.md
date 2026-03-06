@@ -1,5 +1,7 @@
 # Analyze Wing
 
+> This workflow is also available as the MCP prompt `analyze_wing`.
+
 Run a complete aerodynamic wing analysis using the OpenAeroStruct MCP server.
 
 ## Steps
