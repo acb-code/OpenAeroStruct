@@ -38,6 +38,28 @@ class TestBuildMesh:
         assert mesh.shape[0] == 2
         assert mesh.shape[2] == 3
 
+    def test_ucrm_based_returns_twist(self):
+        mesh, twist = build_mesh("uCRM_based", num_x=3, num_y=7, span=60.0, root_chord=10.0, symmetry=True)
+        assert twist is not None
+        assert len(twist) >= 2
+
+    def test_ucrm_based_mesh_shape(self):
+        mesh, _ = build_mesh("uCRM_based", num_x=3, num_y=7, span=60.0, root_chord=10.0, symmetry=True)
+        assert mesh.shape[0] == 3
+        assert mesh.shape[2] == 3
+
+    def test_crm_num_twist_cp_explicit(self):
+        # With num_y=7 auto gives max(2,min(5,(7+1)//2))=4; explicit 5 should override
+        _, twist_auto = build_mesh("CRM", num_x=2, num_y=7, span=60.0, root_chord=10.0, symmetry=True)
+        _, twist_explicit = build_mesh("CRM", num_x=2, num_y=7, span=60.0, root_chord=10.0, symmetry=True, num_twist_cp=5)
+        assert len(twist_auto) == 4
+        assert len(twist_explicit) == 5
+
+    def test_crm_num_twist_cp_default_unchanged(self):
+        # Default auto-calculation: num_y=5 → max(2,min(5,(5+1)//2))=3
+        _, twist = build_mesh("CRM", num_x=2, num_y=5, span=60.0, root_chord=10.0, symmetry=True)
+        assert len(twist) == 3
+
     def test_offset_shifts_mesh(self):
         m1, _ = build_mesh("rect", 2, 5, 10.0, 1.0, symmetry=False)
         m2, _ = build_mesh("rect", 2, 5, 10.0, 1.0, symmetry=False, offset=[50.0, 0.0, 0.0])

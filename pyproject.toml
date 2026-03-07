@@ -49,6 +49,8 @@ markers     = [
     "slow: integration tests that run real OAS computations (deselect with -m 'not slow')",
     "golden_physics: Tier-1 physics invariant golden tests (platform-independent)",
     "golden_numerics: Tier-2 numeric baseline golden tests (may vary by platform/deps)",
+    "parity: Tier-3 parity tests verifying MCP matches direct OAS integration tests",
+    "example_parity: Tier-3 parity tests verifying MCP matches direct OAS example workflows",
 ]
 addopts     = "-v"
 

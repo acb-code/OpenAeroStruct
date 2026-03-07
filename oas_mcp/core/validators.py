@@ -21,7 +21,7 @@ def validate_mesh_params(num_x: int, num_y: int) -> None:
 
 
 def validate_wing_type(wing_type: str) -> None:
-    valid = {"rect", "CRM"}
+    valid = {"rect", "CRM", "uCRM_based"}
     if wing_type not in valid:
         raise ValueError(f"wing_type must be one of {valid}, got {wing_type!r}")
 
@@ -81,6 +81,28 @@ def validate_design_variables_for_surfaces(
                     f"but surface {name!r} uses fem_model_type={fem_type!r}. "
                     f"Use 'thickness' for tube models."
                 )
+
+
+def validate_flight_points(flight_points: list[dict]) -> None:
+    """Validate a list of multipoint flight condition dicts."""
+    required_keys = {"velocity", "Mach_number", "density", "reynolds_number", "speed_of_sound", "load_factor"}
+    for i, fp in enumerate(flight_points):
+        missing = required_keys - set(fp.keys())
+        if missing:
+            raise ValueError(
+                f"flight_points[{i}] is missing required keys: {sorted(missing)}. "
+                f"Required: {sorted(required_keys)}."
+            )
+        if fp["velocity"] <= 0:
+            raise ValueError(f"flight_points[{i}].velocity must be positive, got {fp['velocity']}")
+        if fp["Mach_number"] <= 0:
+            raise ValueError(f"flight_points[{i}].Mach_number must be positive, got {fp['Mach_number']}")
+        if fp["density"] <= 0:
+            raise ValueError(f"flight_points[{i}].density must be positive, got {fp['density']}")
+        if fp["reynolds_number"] <= 0:
+            raise ValueError(f"flight_points[{i}].reynolds_number must be positive, got {fp['reynolds_number']}")
+        if fp["speed_of_sound"] <= 0:
+            raise ValueError(f"flight_points[{i}].speed_of_sound must be positive, got {fp['speed_of_sound']}")
 
 
 def validate_struct_props_present(surface: dict) -> None:

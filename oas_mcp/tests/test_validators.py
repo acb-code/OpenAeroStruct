@@ -4,6 +4,7 @@ import pytest
 from oas_mcp.core.validators import (
     validate_fem_model_type,
     validate_flight_conditions,
+    validate_flight_points,
     validate_mesh_params,
     validate_positive,
     validate_struct_props_present,
@@ -52,6 +53,9 @@ class TestValidateWingType:
     def test_crm_ok(self):
         validate_wing_type("CRM")
 
+    def test_ucrm_based_ok(self):
+        validate_wing_type("uCRM_based")
+
     def test_invalid_raises(self):
         with pytest.raises(ValueError, match="wing_type"):
             validate_wing_type("naca0012")
@@ -90,6 +94,44 @@ class TestValidateFlightConditions:
     def test_alpha_out_of_range(self):
         with pytest.raises(ValueError, match="alpha"):
             validate_flight_conditions(250.0, 95.0, 0.84, 1e6, 0.38)
+
+
+_VALID_FP = {
+    "velocity": 250.81,
+    "Mach_number": 0.85,
+    "density": 0.348,
+    "reynolds_number": 6110000.0,
+    "speed_of_sound": 295.07,
+    "load_factor": 1.0,
+}
+
+
+class TestValidateFlightPoints:
+    def test_valid_single_point(self):
+        validate_flight_points([_VALID_FP])
+
+    def test_valid_two_points(self):
+        maneuver = {**_VALID_FP, "load_factor": 2.5, "velocity": 217.79}
+        validate_flight_points([_VALID_FP, maneuver])
+
+    def test_missing_key_raises(self):
+        bad = {k: v for k, v in _VALID_FP.items() if k != "speed_of_sound"}
+        with pytest.raises(ValueError, match="speed_of_sound"):
+            validate_flight_points([bad])
+
+    def test_negative_velocity_raises(self):
+        bad = {**_VALID_FP, "velocity": -1.0}
+        with pytest.raises(ValueError, match="velocity"):
+            validate_flight_points([bad])
+
+    def test_zero_density_raises(self):
+        bad = {**_VALID_FP, "density": 0.0}
+        with pytest.raises(ValueError, match="density"):
+            validate_flight_points([bad])
+
+    def test_alpha_optional(self):
+        fp_with_alpha = {**_VALID_FP, "alpha": 2.0}
+        validate_flight_points([fp_with_alpha])  # no error
 
 
 class TestValidateStructProps:

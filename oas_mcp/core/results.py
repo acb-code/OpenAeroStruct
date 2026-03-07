@@ -228,6 +228,25 @@ def extract_standard_detail(
     return standard
 
 
+def extract_multipoint_results(
+    prob: om.Problem,
+    surfaces: list[dict],
+    point_names: list[str],
+    roles: list[str] | None = None,
+) -> dict:
+    """Extract aerostructural results for each flight point in a multipoint optimization.
+
+    Returns a dict keyed by role (e.g. "cruise", "maneuver") mapping to
+    the per-point results dict from ``extract_aerostruct_results``.
+    """
+    if roles is None:
+        roles = [f"point_{i}" for i in range(len(point_names))]
+    return {
+        role: extract_aerostruct_results(prob, surfaces, pt)
+        for role, pt in zip(roles, point_names)
+    }
+
+
 def extract_stability_results(prob: om.Problem) -> dict:
     """Extract stability derivative results."""
     results = {}

@@ -467,6 +467,109 @@ class TestRunOptimization:
 
 
 # ---------------------------------------------------------------------------
+# Multipoint wingbox optimization
+# ---------------------------------------------------------------------------
+
+
+class TestMultipointWingboxOptimization:
+    """Integration test for multipoint aerostructural optimization.
+
+    Uses a coarse mesh (num_y=7, rect planform) and very few iterations
+    (max_iterations=5) to verify the multipoint wiring and result structure
+    without waiting for convergence. Complex features (distributed fuel weight,
+    point masses) are disabled to keep the solver stable on a coarse mesh.
+    """
+
+    async def test_multipoint_result_structure(self):
+        await reset()
+        await create_surface(
+            name="wing",
+            wing_type="rect",
+            num_x=3,
+            num_y=7,
+            span=30.0,
+            root_chord=5.0,
+            fem_model_type="wingbox",
+            E=73.1e9,
+            G=73.1e9 / 2 / 1.33,
+            yield_stress=420e6,
+            safety_factor=1.5,
+            mrho=2780.0,
+            struct_weight_relief=False,
+            distributed_fuel_weight=False,
+            fuel_density=803.0,
+            Wf_reserve=15000.0,
+            wing_weight_ratio=1.25,
+            CD0=0.0078,
+            with_wave=True,
+        )
+
+        flight_points = [
+            # Cruise
+            {"velocity": 248.0, "Mach_number": 0.84, "density": 0.38,
+             "reynolds_number": 1.0e6, "speed_of_sound": 295.0, "load_factor": 1.0},
+            # 2.5g maneuver
+            {"velocity": 200.0, "Mach_number": 0.60, "density": 0.80,
+             "reynolds_number": 2.0e6, "speed_of_sound": 333.0, "load_factor": 2.5},
+        ]
+
+        env = await run_optimization(
+            surfaces=["wing"],
+            analysis_type="aerostruct",
+            objective="fuelburn",
+            flight_points=flight_points,
+            design_variables=[
+                {"name": "twist", "lower": -5.0, "upper": 10.0, "scaler": 0.1},
+                {"name": "spar_thickness", "lower": 0.003, "upper": 0.1, "scaler": 100.0},
+                {"name": "skin_thickness", "lower": 0.003, "upper": 0.1, "scaler": 100.0},
+                {"name": "alpha_maneuver", "lower": -10.0, "upper": 15.0},
+                {"name": "fuel_mass", "lower": 1000.0, "upper": 100000.0, "scaler": 1e-5},
+            ],
+            constraints=[
+                {"name": "CL", "point": 0, "equals": 0.5},
+                {"name": "L_equals_W", "point": 1, "equals": 0.0},
+                {"name": "failure", "point": 1, "upper": 0.0},
+            ],
+            CT=0.53 / 3600,
+            R=14307000.0,
+            W0_without_point_masses=50000.0,
+            tolerance=0.5,
+            max_iterations=5,
+        )
+
+        assert env["schema_version"] == "1.0"
+        result = _r(env)
+
+        # Top-level structure
+        assert "success" in result
+        assert "optimized_design_variables" in result
+        assert "final_results" in result
+        assert "optimization_history" in result
+
+        # Multipoint results keyed by role
+        fr = result["final_results"]
+        assert "cruise" in fr
+        assert "maneuver" in fr
+
+        # Per-point physics sanity checks
+        for role in ("cruise", "maneuver"):
+            pt = fr[role]
+            assert pt["CL"] > 0, f"{role} CL should be positive"
+            assert pt["CD"] > 0, f"{role} CD should be positive"
+            assert isinstance(pt.get("fuelburn"), float), f"{role} fuelburn should be a float"
+
+        # DV arrays returned in root-to-tip order
+        dvs = result["optimized_design_variables"]
+        assert "twist" in dvs
+        assert isinstance(dvs["twist"], list)
+
+        # fuel_mass should be present as a scalar list
+        assert "fuel_mass" in dvs
+        fm = dvs["fuel_mass"]
+        assert isinstance(fm, list) and len(fm) == 1
+
+
+# ---------------------------------------------------------------------------
 # reset
 # ---------------------------------------------------------------------------
 

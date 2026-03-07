@@ -224,6 +224,9 @@ DV_NAME_MAP = {
     "alpha": "alpha",
     "spar_thickness": "{name}.spar_thickness_cp",
     "skin_thickness": "{name}.skin_thickness_cp",
+    "t_over_c": "{name}.geometry.t_over_c_cp",
+    "alpha_maneuver": "alpha_maneuver",
+    "fuel_mass": "fuel_mass",
 }
 
 CONSTRAINT_NAME_MAP_AERO = {
@@ -240,6 +243,9 @@ CONSTRAINT_NAME_MAP_AEROSTRUCT = {
     # thickness_intersects is tube-only — raises ValueError for wingbox surfaces
     "thickness_intersects": "{point}.{name}_perf.thickness_intersects",
     "L_equals_W": "{point}.L_equals_W",
+    # Multipoint-only top-level constraints (no point/name substitution)
+    "fuel_vol_delta": "fuel_vol_delta.fuel_vol_delta",
+    "fuel_diff": "fuel_diff",
 }
 
 OBJECTIVE_MAP_AERO = {
@@ -270,6 +276,7 @@ def build_optimization_problem(
     design_variables: list[dict],
     constraints: list[dict],
     flight_conditions: dict,
+    objective_scaler: float = 1.0,
     tolerance: float = 1e-6,
     max_iterations: int = 200,
 ) -> tuple[om.Problem, str]:
@@ -371,7 +378,8 @@ def build_optimization_problem(
     if obj_template is None:
         raise ValueError(f"Unknown objective {objective!r}. Options: {list(obj_map)}")
     obj_path = resolve_path(obj_template, primary_name, point_name)
-    prob.model.add_objective(obj_path)
+    obj_kwargs = {"scaler": objective_scaler} if objective_scaler != 1.0 else {}
+    prob.model.add_objective(obj_path, **obj_kwargs)
 
     prob.setup(force_alloc_complex=False)
 
@@ -403,3 +411,237 @@ def build_optimization_problem(
         )
 
     return prob, point_name
+
+
+# ---------------------------------------------------------------------------
+# Multipoint aerostructural assembler and optimisation problem builder
+# ---------------------------------------------------------------------------
+
+
+def _assemble_multipoint_aerostruct_model(
+    prob: om.Problem,
+    surfaces: list[dict],
+    flight_points: list[dict],
+    CT: float,
+    R: float,
+    W0_without_point_masses: float,
+    alpha: float = 0.0,
+    alpha_maneuver: float = 0.0,
+    empty_cg: list | None = None,
+    fuel_mass: float = 10000.0,
+    point_masses: list | None = None,
+    point_mass_locations: list | None = None,
+) -> list[str]:
+    """Assemble a multipoint aerostructural model following the OAS tutorial.
+
+    Returns list of point names ["AS_point_0", "AS_point_1", ...].
+    """
+    from openaerostruct.structures.wingbox_fuel_vol_delta import WingboxFuelVolDelta
+
+    if empty_cg is None:
+        empty_cg = [0.0, 0.0, 0.0]
+
+    N = len(flight_points)
+    v_arr = np.array([fp["velocity"] for fp in flight_points])
+    mach_arr = np.array([fp["Mach_number"] for fp in flight_points])
+    re_arr = np.array([fp["reynolds_number"] for fp in flight_points])
+    rho_arr = np.array([fp["density"] for fp in flight_points])
+    sos_arr = np.array([fp["speed_of_sound"] for fp in flight_points])
+    lf_arr = np.array([fp.get("load_factor", 1.0) for fp in flight_points])
+
+    has_point_masses = point_masses is not None and len(point_masses) > 0
+    pm_arr = np.array(point_masses) if has_point_masses else np.zeros((1, 1))
+    pml_arr = np.array(point_mass_locations) if has_point_masses else np.zeros((1, 3))
+
+    indep = om.IndepVarComp()
+    indep.add_output("v", val=v_arr, units="m/s")
+    indep.add_output("Mach_number", val=mach_arr)
+    indep.add_output("re", val=re_arr, units="1/m")
+    indep.add_output("rho", val=rho_arr, units="kg/m**3")
+    indep.add_output("speed_of_sound", val=sos_arr, units="m/s")
+    indep.add_output("load_factor", val=lf_arr)
+    indep.add_output("CT", val=CT, units="1/s")
+    indep.add_output("R", val=R, units="m")
+    indep.add_output("W0_without_point_masses", val=W0_without_point_masses, units="kg")
+    indep.add_output("alpha", val=alpha, units="deg")
+    indep.add_output("alpha_maneuver", val=alpha_maneuver, units="deg")
+    indep.add_output("empty_cg", val=np.array(empty_cg), units="m")
+    indep.add_output("fuel_mass", val=fuel_mass, units="kg")
+    indep.add_output("point_masses", val=pm_arr, units="kg")
+    indep.add_output("point_mass_locations", val=pml_arr, units="m")
+    prob.model.add_subsystem("prob_vars", indep, promotes=["*"])
+
+    prob.model.add_subsystem(
+        "W0_comp",
+        om.ExecComp("W0 = W0_without_point_masses + 2 * sum(point_masses)", units="kg"),
+        promotes=["*"],
+    )
+
+    for surface in surfaces:
+        prob.model.add_subsystem(surface["name"], AerostructGeometry(surface=surface))
+
+    point_names = []
+    for i in range(N):
+        pt = f"AS_point_{i}"
+        point_names.append(pt)
+
+        AS_point = AerostructPoint(surfaces=surfaces, internally_connect_fuelburn=False)
+        prob.model.add_subsystem(pt, AS_point)
+
+        prob.model.connect("v", pt + ".v", src_indices=[i])
+        prob.model.connect("Mach_number", pt + ".Mach_number", src_indices=[i])
+        prob.model.connect("re", pt + ".re", src_indices=[i])
+        prob.model.connect("rho", pt + ".rho", src_indices=[i])
+        prob.model.connect("speed_of_sound", pt + ".speed_of_sound", src_indices=[i])
+        prob.model.connect("load_factor", pt + ".load_factor", src_indices=[i])
+        prob.model.connect("CT", pt + ".CT")
+        prob.model.connect("R", pt + ".R")
+        prob.model.connect("W0", pt + ".W0")
+        prob.model.connect("empty_cg", pt + ".empty_cg")
+        prob.model.connect("fuel_mass", pt + ".total_perf.L_equals_W.fuelburn")
+        prob.model.connect("fuel_mass", pt + ".total_perf.CG.fuelburn")
+
+        for surface in surfaces:
+            name = surface["name"]
+            fem_type = surface.get("fem_model_type", "tube")
+            struct_weight_relief = surface.get("struct_weight_relief", False)
+            distributed_fuel_weight = surface.get("distributed_fuel_weight", False)
+
+            if distributed_fuel_weight:
+                prob.model.connect("load_factor", pt + ".coupled.load_factor", src_indices=[i])
+
+            connect_aerostruct_surface(prob.model, name, pt, fem_model_type=fem_type)
+
+            if struct_weight_relief:
+                prob.model.connect(name + ".element_mass", pt + ".coupled." + name + ".element_mass")
+
+            if has_point_masses:
+                coupled_name = pt + ".coupled." + name
+                prob.model.connect("point_masses", coupled_name + ".point_masses")
+                prob.model.connect("point_mass_locations", coupled_name + ".point_mass_locations")
+
+            if distributed_fuel_weight:
+                prob.model.connect(
+                    name + ".struct_setup.fuel_vols",
+                    pt + ".coupled." + name + ".struct_states.fuel_vols",
+                )
+                prob.model.connect("fuel_mass", pt + ".coupled." + name + ".struct_states.fuel_mass")
+
+    prob.model.connect("alpha", "AS_point_0.alpha")
+    if N > 1:
+        prob.model.connect("alpha_maneuver", "AS_point_1.alpha")
+
+    # Fuel volume constraint and diff components (wingbox only)
+    wingbox_surfaces = [s for s in surfaces if s.get("fem_model_type") == "wingbox"]
+    if wingbox_surfaces:
+        wb_surf = wingbox_surfaces[0]
+        wb_name = wb_surf["name"]
+        prob.model.add_subsystem("fuel_vol_delta", WingboxFuelVolDelta(surface=wb_surf))
+        prob.model.connect(wb_name + ".struct_setup.fuel_vols", "fuel_vol_delta.fuel_vols")
+        prob.model.connect("AS_point_0.fuelburn", "fuel_vol_delta.fuelburn")
+
+        comp = om.ExecComp("fuel_diff = (fuel_mass - fuelburn) / fuelburn", units="kg")
+        prob.model.add_subsystem("fuel_diff", comp, promotes_inputs=["fuel_mass"], promotes_outputs=["fuel_diff"])
+        prob.model.connect("AS_point_0.fuelburn", "fuel_diff.fuelburn")
+
+    return point_names
+
+
+# Top-level constraint templates that need no point/name substitution
+_MP_TOPLEVEL_CONSTRAINTS = {"fuel_vol_delta", "fuel_diff"}
+# DV names that are scalar top-level variables (not surface-path-formatted)
+_MP_SCALAR_DVS = {"alpha_maneuver", "fuel_mass"}
+
+
+def build_multipoint_optimization_problem(
+    surfaces: list[dict],
+    objective: str,
+    design_variables: list[dict],
+    constraints: list[dict],
+    flight_points: list[dict],
+    CT: float,
+    R: float,
+    W0_without_point_masses: float,
+    alpha: float = 0.0,
+    alpha_maneuver: float = 0.0,
+    empty_cg: list | None = None,
+    fuel_mass: float = 10000.0,
+    point_masses: list | None = None,
+    point_mass_locations: list | None = None,
+    tolerance: float = 1e-2,
+    max_iterations: int = 200,
+) -> tuple[om.Problem, list[str]]:
+    """Build and set up a multipoint aerostructural optimisation problem.
+
+    Returns (prob, point_names).  The caller should call prob.run_driver().
+    """
+    prob = om.Problem(reports=False)
+    prob.driver = om.ScipyOptimizeDriver()
+    prob.driver.options["optimizer"] = "SLSQP"
+    prob.driver.options["tol"] = tolerance
+    prob.driver.options["maxiter"] = max_iterations
+
+    point_names = _assemble_multipoint_aerostruct_model(
+        prob, surfaces, flight_points, CT, R, W0_without_point_masses,
+        alpha, alpha_maneuver, empty_cg, fuel_mass, point_masses, point_mass_locations,
+    )
+
+    validate_design_variables_for_surfaces(design_variables, surfaces)
+
+    primary_name = surfaces[0]["name"] if surfaces else "wing"
+
+    for dv in design_variables:
+        dv_name = dv.get("name", "")
+        template = DV_NAME_MAP.get(dv_name)
+        if template is None and dv_name.endswith("_cp"):
+            template = DV_NAME_MAP.get(dv_name[:-3])
+        if template is None:
+            raise ValueError(f"Unknown design variable {dv_name!r}. Options: {list(DV_NAME_MAP)}")
+        # Scalar DVs have literal paths; surface DVs need name/point substitution
+        path = template if dv_name in _MP_SCALAR_DVS else resolve_path(template, primary_name, point_names[0])
+        kwargs = {}
+        if "lower" in dv:
+            kwargs["lower"] = dv["lower"]
+        if "upper" in dv:
+            kwargs["upper"] = dv["upper"]
+        if "scaler" in dv:
+            kwargs["scaler"] = dv["scaler"]
+        prob.model.add_design_var(path, **kwargs)
+
+    for con in constraints:
+        con_name = con.get("name", "")
+        template = CONSTRAINT_NAME_MAP_AEROSTRUCT.get(con_name)
+        if template is None:
+            raise ValueError(f"Unknown constraint {con_name!r}. Options: {list(CONSTRAINT_NAME_MAP_AEROSTRUCT)}")
+        if con_name in _MP_TOPLEVEL_CONSTRAINTS:
+            path = template  # literal path, no substitution
+        else:
+            pt_idx = con.get("point", 0)
+            pt_name = point_names[pt_idx] if pt_idx < len(point_names) else point_names[0]
+            path = resolve_path(template, primary_name, pt_name)
+        kwargs = {}
+        if "equals" in con:
+            kwargs["equals"] = con["equals"]
+        if "lower" in con:
+            kwargs["lower"] = con["lower"]
+        if "upper" in con:
+            kwargs["upper"] = con["upper"]
+        prob.model.add_constraint(path, **kwargs)
+
+    obj_template = OBJECTIVE_MAP_AEROSTRUCT.get(objective)
+    if obj_template is None:
+        raise ValueError(f"Unknown objective {objective!r}. Options: {list(OBJECTIVE_MAP_AEROSTRUCT)}")
+    obj_path = resolve_path(obj_template, primary_name, point_names[0])
+    prob.model.add_objective(obj_path)
+
+    prob.setup(force_alloc_complex=False)
+
+    # Set Aitken-accelerated linear solver on each coupled group
+    for pt in point_names:
+        pt_group = getattr(prob.model, pt, None)
+        if pt_group is not None:
+            coupled = getattr(pt_group, "coupled", None)
+            if coupled is not None:
+                coupled.linear_solver = om.LinearBlockGS(iprint=0, maxiter=30, use_aitken=True)
+
+    return prob, point_names

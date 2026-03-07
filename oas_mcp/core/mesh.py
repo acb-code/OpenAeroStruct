@@ -12,6 +12,7 @@ def build_mesh(
     root_chord: float,
     symmetry: bool,
     offset=None,
+    num_twist_cp: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """
     Generate a mesh and optional initial twist array.
@@ -32,10 +33,10 @@ def build_mesh(
     if offset is not None:
         mesh_dict["offset"] = np.asarray(offset, dtype=float)
 
-    if wing_type == "CRM":
-        # generate_mesh returns (mesh, twist_cp) for CRM
+    if "CRM" in wing_type:
+        # generate_mesh returns (mesh, twist_cp) for CRM and uCRM_based
         # (mesh is already chopped for symmetry if symmetry=True)
-        mesh_dict["num_twist_cp"] = max(2, min(5, (num_y + 1) // 2))
+        mesh_dict["num_twist_cp"] = num_twist_cp if num_twist_cp is not None else max(2, min(5, (num_y + 1) // 2))
         mesh, twist_out = generate_mesh(mesh_dict)
         return mesh, twist_out
     else:

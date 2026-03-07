@@ -31,6 +31,7 @@ from .core.builders import (
     build_aero_problem,
     build_aerostruct_problem,
     build_optimization_problem,
+    build_multipoint_optimization_problem,
 )
 from .core.defaults import (
     DEFAULT_AEROSTRUCT_CONDITIONS,
@@ -49,6 +50,7 @@ from .core.requirements import check_requirements
 from .core.results import (
     extract_aero_results,
     extract_aerostruct_results,
+    extract_multipoint_results,
     extract_stability_results,
     extract_standard_detail,
 )
@@ -74,6 +76,7 @@ from .core.session import SessionManager
 from .core.validators import (
     validate_fem_model_type,
     validate_flight_conditions,
+    validate_flight_points,
     validate_mesh_params,
     validate_struct_props_present,
     validate_surface_names_exist,
@@ -397,7 +400,7 @@ def _is_cp_dv(name: str) -> bool:
 @mcp.tool()
 async def create_surface(
     name: Annotated[str, "Unique surface name (e.g. 'wing', 'tail')"] = "wing",
-    wing_type: Annotated[str, "Mesh type: 'rect' for rectangular or 'CRM' for Common Research Model"] = "rect",
+    wing_type: Annotated[str, "Mesh type: 'rect', 'CRM', or 'uCRM_based'"] = "rect",
     span: Annotated[float, "Full wingspan in metres"] = 10.0,
     root_chord: Annotated[float, "Root chord length in metres"] = 1.0,
     taper: Annotated[float, "Taper ratio (tip_chord / root_chord), 1.0 = no taper"] = 1.0,
@@ -424,6 +427,15 @@ async def create_surface(
     safety_factor: Annotated[float, "Safety factor applied to yield stress"] = 2.5,
     mrho: Annotated[float, "Material density in kg/m^3 (default: Al 7075, 3000 kg/m^3)"] = 3.0e3,
     offset: Annotated[list[float] | None, "3-element [x, y, z] offset of the surface origin in metres"] = None,
+    S_ref_type: Annotated[str, "Reference area type: 'wetted' or 'projected'"] = "wetted",
+    c_max_t: Annotated[float, "Chordwise location of maximum thickness (fraction of chord)"] = 0.303,
+    wing_weight_ratio: Annotated[float, "Ratio of total wing weight to structural wing weight"] = 2.0,
+    struct_weight_relief: Annotated[bool, "If True, include structural weight relief in the load distribution"] = False,
+    distributed_fuel_weight: Annotated[bool, "If True, include distributed fuel weight in the load distribution"] = False,
+    fuel_density: Annotated[float, "Fuel density in kg/m^3 (needed for fuel volume constraint)"] = 803.0,
+    Wf_reserve: Annotated[float, "Reserve fuel mass in kg (subtracted from fuel volume constraint)"] = 15000.0,
+    n_point_masses: Annotated[int, "Number of point masses (e.g. engines) attached to this surface"] = 0,
+    num_twist_cp: Annotated[int | None, "Number of twist control points for CRM/uCRM_based mesh generation (None = auto)"] = None,
     session_id: Annotated[str, "Session identifier"] = "default",
 ) -> dict:
     """Define a lifting surface (wing, tail, canard) and store it in the session.
@@ -449,6 +461,7 @@ async def create_surface(
             root_chord=root_chord,
             symmetry=symmetry,
             offset=offset,
+            num_twist_cp=num_twist_cp,
         )
 
         # Apply geometric modifications
@@ -473,7 +486,7 @@ async def create_surface(
         surface = {
             "name": name,
             "symmetry": symmetry,
-            "S_ref_type": "wetted",
+            "S_ref_type": S_ref_type,
             "mesh": mesh,
             "twist_cp": tcp,
             "CL0": CL0,
@@ -484,7 +497,7 @@ async def create_surface(
                 if t_over_c_cp is not None
                 else np.array([0.15])
             ),
-            "c_max_t": 0.303,
+            "c_max_t": c_max_t,
             "with_viscous": with_viscous,
             "with_wave": with_wave,
         }
@@ -500,10 +513,14 @@ async def create_surface(
             surface["safety_factor"] = safety_factor
             surface["mrho"] = mrho
             surface["fem_origin"] = 0.35
-            surface["wing_weight_ratio"] = 2.0
-            surface["struct_weight_relief"] = False
-            surface["distributed_fuel_weight"] = False
+            surface["wing_weight_ratio"] = wing_weight_ratio
+            surface["struct_weight_relief"] = struct_weight_relief
+            surface["distributed_fuel_weight"] = distributed_fuel_weight
             surface["exact_failure_constraint"] = False
+            surface["fuel_density"] = fuel_density
+            surface["Wf_reserve"] = Wf_reserve
+            if n_point_masses > 0:
+                surface["n_point_masses"] = n_point_masses
 
             if fem_model_type == "wingbox":
                 # Wingbox-specific thickness control points
@@ -996,16 +1013,27 @@ async def run_optimization(
     ] = None,
     constraints: Annotated[
         list[dict],
-        "List of constraint dicts, e.g. [{'name':'CL','equals':0.5}, {'name':'failure','upper':0.0}]"
+        "List of constraint dicts, e.g. [{'name':'CL','equals':0.5,'point':0}, {'name':'failure','upper':0.0,'point':1}]"
     ] = None,
-    velocity: Annotated[float, "Free-stream velocity in m/s"] = 248.136,
+    velocity: Annotated[float, "Free-stream velocity in m/s (single-point only)"] = 248.136,
     alpha: Annotated[float, "Initial angle of attack in degrees"] = 5.0,
-    Mach_number: Annotated[float, "Mach number"] = 0.84,
-    reynolds_number: Annotated[float, "Reynolds number per unit length (1/m)"] = 1.0e6,
-    density: Annotated[float, "Air density in kg/m^3"] = 0.38,
-    W0: Annotated[float, "Aircraft empty weight in kg (aerostruct only)"] = 0.4 * 3e5,
-    speed_of_sound: Annotated[float, "Speed of sound in m/s (aerostruct only)"] = 295.4,
-    load_factor: Annotated[float, "Load factor (aerostruct only)"] = 1.0,
+    Mach_number: Annotated[float, "Mach number (single-point only)"] = 0.84,
+    reynolds_number: Annotated[float, "Reynolds number per unit length (1/m, single-point only)"] = 1.0e6,
+    density: Annotated[float, "Air density in kg/m^3 (single-point only)"] = 0.38,
+    W0: Annotated[float, "Aircraft empty weight in kg (single-point aerostruct only)"] = 0.4 * 3e5,
+    speed_of_sound: Annotated[float, "Speed of sound in m/s (single-point aerostruct only)"] = 295.4,
+    load_factor: Annotated[float, "Load factor (single-point aerostruct only)"] = 1.0,
+    CT: Annotated[float | None, "Thrust specific fuel consumption in 1/s (None = OAS default ~1.67e-4)"] = None,
+    R: Annotated[float, "Range in metres"] = 14.307e6,
+    flight_points: Annotated[
+        list[dict] | None,
+        "Multipoint flight conditions. Each dict requires: velocity, Mach_number, density, "
+        "reynolds_number, speed_of_sound, load_factor. Enables multipoint aerostruct optimization."
+    ] = None,
+    W0_without_point_masses: Annotated[float, "Empty weight + reserve fuel in kg (multipoint only)"] = 143000.0,
+    point_masses: Annotated[list[list[float]] | None, "Point masses in kg, e.g. [[10000]] for one engine"] = None,
+    point_mass_locations: Annotated[list[list[float]] | None, "Point mass [x,y,z] locations in m, e.g. [[25,-10,0]]"] = None,
+    objective_scaler: Annotated[float, "Scaler applied to the objective in add_objective (e.g. 1e4 for CD, 1e-5 for fuelburn)"] = 1.0,
     tolerance: Annotated[float, "Optimiser convergence tolerance"] = 1e-6,
     max_iterations: Annotated[int, "Maximum optimiser iterations"] = 200,
     session_id: Annotated[str, "Session identifier"] = "default",
@@ -1014,16 +1042,23 @@ async def run_optimization(
     """Run a design optimisation.
 
     Minimises the objective function subject to the given constraints by
-    varying the specified design variables.  Supports aero-only (VLM) and
-    coupled aerostructural problems.
+    varying the specified design variables.  Supports aero-only (VLM),
+    single-point aerostructural, and multipoint aerostructural problems.
 
-    Design variable names (all models):   'twist', 'chord', 'sweep', 'taper', 'alpha'
-    Design variable names (tube only):    'thickness'
-    Design variable names (wingbox only): 'spar_thickness', 'skin_thickness'
-    Constraint names (aero):              'CL', 'CD', 'CM'
-    Constraint names (aerostruct):        all aero + 'failure', 'thickness_intersects', 'L_equals_W'
-    Objective names (aero):               'CD', 'CL'
-    Objective names (aerostruct):         'fuelburn', 'structural_mass', 'CD'
+    Design variable names (all models):     'twist', 'chord', 'sweep', 'taper', 'alpha', 't_over_c'
+    Design variable names (tube only):      'thickness'
+    Design variable names (wingbox only):   'spar_thickness', 'skin_thickness'
+    Design variable names (multipoint):     'alpha_maneuver', 'fuel_mass'
+    Constraint names (aero):                'CL', 'CD', 'CM'
+    Constraint names (aerostruct):          all aero + 'failure', 'thickness_intersects', 'L_equals_W'
+    Constraint names (multipoint):          all aerostruct + 'fuel_vol_delta', 'fuel_diff'
+    Objective names (aero):                 'CD', 'CL'
+    Objective names (aerostruct):           'fuelburn', 'structural_mass', 'CD'
+
+    For multipoint optimization, pass flight_points as a list of dicts with keys:
+    velocity, Mach_number, density, reynolds_number, speed_of_sound, load_factor.
+    Point 0 = cruise, point 1 = maneuver.  Constraint dicts accept an optional
+    'point' key (int index, default 0) to target a specific flight point.
     """
     if design_variables is None:
         design_variables = [{"name": "alpha", "lower": -10.0, "upper": 15.0}]
@@ -1041,79 +1076,136 @@ async def run_optimization(
         for s in surface_dicts:
             validate_struct_props_present(s)
 
-    from openaerostruct.utils.constants import grav_constant
-    ct_val = grav_constant * 17.0e-6
+    if flight_points is not None:
+        validate_flight_points(flight_points)
 
-    if analysis_type == "aero":
-        flight_conditions = {
-            "velocity": velocity,
-            "alpha": alpha,
-            "Mach_number": Mach_number,
-            "reynolds_number": reynolds_number,
-            "density": density,
-        }
-    else:
-        flight_conditions = {
-            "velocity": velocity,
-            "alpha": alpha,
-            "Mach_number": Mach_number,
-            "reynolds_number": reynolds_number,
-            "density": density,
-            "CT": ct_val,
-            "W0": W0,
-            "speed_of_sound": speed_of_sound,
-            "load_factor": load_factor,
-        }
+    from openaerostruct.utils.constants import grav_constant
+    ct_default = grav_constant * 17.0e-6
+    ct_val = CT if CT is not None else ct_default
 
     def _run():
-        prob, point_name = build_optimization_problem(
-            surface_dicts,
-            analysis_type=analysis_type,
-            objective=objective,
-            design_variables=design_variables,
-            constraints=constraints,
-            flight_conditions=flight_conditions,
-            tolerance=tolerance,
-            max_iterations=max_iterations,
-        )
-
         from .core.builders import (
-            DV_NAME_MAP, OBJECTIVE_MAP_AERO, OBJECTIVE_MAP_AEROSTRUCT, resolve_path,
+            DV_NAME_MAP, OBJECTIVE_MAP_AERO, OBJECTIVE_MAP_AEROSTRUCT,
+            _MP_SCALAR_DVS, resolve_path,
         )
         from .core.convergence import OptimizationTracker
 
         primary_name = surface_dicts[0]["name"] if surface_dicts else "wing"
 
-        # Build DV path map for tracking
-        dv_path_map: dict[str, str] = {}
-        for dv in design_variables:
-            template = DV_NAME_MAP.get(dv["name"])
-            if template:
-                dv_path_map[dv["name"]] = resolve_path(template, primary_name, point_name)
+        if flight_points is not None and analysis_type == "aerostruct":
+            # ----------------------------------------------------------------
+            # MULTIPOINT path
+            # ----------------------------------------------------------------
+            prob, point_names = build_multipoint_optimization_problem(
+                surface_dicts,
+                objective=objective,
+                design_variables=design_variables,
+                constraints=constraints,
+                flight_points=flight_points,
+                CT=ct_val,
+                R=R,
+                W0_without_point_masses=W0_without_point_masses,
+                alpha=alpha,
+                point_masses=point_masses,
+                point_mass_locations=point_mass_locations,
+                tolerance=tolerance,
+                max_iterations=max_iterations,
+            )
 
-        # Record initial DV values and attach iteration tracker
-        tracker = OptimizationTracker()
-        initial_dvs = tracker.record_initial(prob, dv_path_map)
-        tracker.attach(prob)
+            dv_path_map: dict[str, str] = {}
+            for dv in design_variables:
+                dv_name = dv["name"]
+                template = DV_NAME_MAP.get(dv_name)
+                if template is None and dv_name.endswith("_cp"):
+                    template = DV_NAME_MAP.get(dv_name[:-3])
+                if template:
+                    path = (template if dv_name in _MP_SCALAR_DVS
+                            else resolve_path(template, primary_name, point_names[0]))
+                    dv_path_map[dv_name] = path
 
-        # Objective path for per-iteration tracking
-        obj_map = OBJECTIVE_MAP_AERO if analysis_type == "aero" else OBJECTIVE_MAP_AEROSTRUCT
-        obj_template = obj_map.get(objective)
-        obj_path = resolve_path(obj_template, primary_name, point_name) if obj_template else ""
+            tracker = OptimizationTracker()
+            initial_dvs = tracker.record_initial(prob, dv_path_map)
+            tracker.attach(prob)
 
-        prob.run_driver()
-        success = prob.driver.result.success if hasattr(prob.driver, "result") else True
+            obj_template = OBJECTIVE_MAP_AEROSTRUCT.get(objective)
+            obj_path = resolve_path(obj_template, primary_name, point_names[0]) if obj_template else ""
 
-        # Extract iteration history (shuts down recorder, cleans up temp file)
-        opt_history = tracker.extract(dv_path_map, obj_path)
+            prob.run_driver()
+            success = prob.driver.result.success if hasattr(prob.driver, "result") else True
+            opt_history = tracker.extract(dv_path_map, obj_path)
 
-        if analysis_type == "aero":
-            final_results = extract_aero_results(prob, surface_dicts, point_name)
+            # Per-point roles
+            if len(point_names) == 2:
+                roles = ["cruise", "maneuver"]
+            else:
+                roles = ["cruise"] + [f"maneuver_{i}" for i in range(1, len(point_names))]
+            final_results = extract_multipoint_results(prob, surface_dicts, point_names, roles)
+
+            # Standard detail from cruise point for visualization
+            standard = extract_standard_detail(prob, surface_dicts, "aerostruct", point_names[0])
+
         else:
-            final_results = extract_aerostruct_results(prob, surface_dicts, point_name)
+            # ----------------------------------------------------------------
+            # SINGLE-POINT path
+            # ----------------------------------------------------------------
+            if analysis_type == "aero":
+                flight_conditions = {
+                    "velocity": velocity,
+                    "alpha": alpha,
+                    "Mach_number": Mach_number,
+                    "reynolds_number": reynolds_number,
+                    "density": density,
+                }
+            else:
+                flight_conditions = {
+                    "velocity": velocity,
+                    "alpha": alpha,
+                    "Mach_number": Mach_number,
+                    "reynolds_number": reynolds_number,
+                    "density": density,
+                    "CT": ct_val,
+                    "R": R,
+                    "W0": W0,
+                    "speed_of_sound": speed_of_sound,
+                    "load_factor": load_factor,
+                }
 
-        # Extract standard detail for visualization (persisted in artifact)
-        standard = extract_standard_detail(prob, surface_dicts, analysis_type, point_name)
+            prob, point_name = build_optimization_problem(
+                surface_dicts,
+                analysis_type=analysis_type,
+                objective=objective,
+                design_variables=design_variables,
+                constraints=constraints,
+                flight_conditions=flight_conditions,
+                objective_scaler=objective_scaler,
+                tolerance=tolerance,
+                max_iterations=max_iterations,
+            )
+
+            dv_path_map = {}
+            for dv in design_variables:
+                template = DV_NAME_MAP.get(dv["name"])
+                if template:
+                    dv_path_map[dv["name"]] = resolve_path(template, primary_name, point_name)
+
+            tracker = OptimizationTracker()
+            initial_dvs = tracker.record_initial(prob, dv_path_map)
+            tracker.attach(prob)
+
+            obj_map = OBJECTIVE_MAP_AERO if analysis_type == "aero" else OBJECTIVE_MAP_AEROSTRUCT
+            obj_template = obj_map.get(objective)
+            obj_path = resolve_path(obj_template, primary_name, point_name) if obj_template else ""
+
+            prob.run_driver()
+            success = prob.driver.result.success if hasattr(prob.driver, "result") else True
+            opt_history = tracker.extract(dv_path_map, obj_path)
+
+            if analysis_type == "aero":
+                final_results = extract_aero_results(prob, surface_dicts, point_name)
+            else:
+                final_results = extract_aerostruct_results(prob, surface_dicts, point_name)
+
+            standard = extract_standard_detail(prob, surface_dicts, analysis_type, point_name)
 
         # Extract optimised DV values
         dv_results: dict = {}
@@ -1151,11 +1243,20 @@ async def run_optimization(
 
     session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
 
-    inputs = {
+    inputs: dict = {
         "analysis_type": analysis_type, "objective": objective,
-        "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
-        "density": density,
+        "alpha": alpha,
     }
+    if flight_points is not None:
+        inputs["multipoint"] = True
+        inputs["n_flight_points"] = len(flight_points)
+        inputs["CT"] = ct_val
+        inputs["R"] = R
+    else:
+        inputs["velocity"] = velocity
+        inputs["Mach_number"] = Mach_number
+        inputs["density"] = density
+
     findings = validate_optimization(result, context={"analysis_type": analysis_type})
     return await _finalize_analysis(
         tool_name="run_optimization", run_id=run_id,

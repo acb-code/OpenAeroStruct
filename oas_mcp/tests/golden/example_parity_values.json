@@ -1,0 +1,239 @@
+{
+  "schema_version": "1.0",
+  "description": "OAS example workflow reference values for MCP example parity tests",
+  "reproducibility_header": {
+    "python_version": "3.11.14 (main, Oct 31 2025, 23:04:14) [Clang 21.1.4 ]",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "openmdao_version": "3.42.0",
+    "oas_version": "2.12.0",
+    "numpy_version": "2.4.2",
+    "note": "Run with OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1"
+  },
+  "cases": {
+    "stability_derivs": {
+      "source": "openaerostruct/examples/stability_derivatives.py",
+      "surface_config": {
+        "name": "wing",
+        "wing_type": "rect",
+        "num_x": 3,
+        "num_y": 15,
+        "symmetry": true,
+        "S_ref_type": "wetted",
+        "sweep": 10.0,
+        "t_over_c_cp": [
+          0.15
+        ],
+        "c_max_t": 0.303,
+        "CD0": 0.015,
+        "with_viscous": true,
+        "with_wave": false,
+        "num_twist_cp": 2,
+        "twist_cp": [
+          0.0,
+          0.0
+        ]
+      },
+      "flight_config": {
+        "surfaces": [
+          "wing"
+        ],
+        "velocity": 248.136,
+        "alpha": 5.0,
+        "Mach_number": 0.84,
+        "reynolds_number": 1000000.0,
+        "density": 0.38,
+        "cg": [
+          0.5,
+          0.0,
+          0.0
+        ]
+      },
+      "expected": {
+        "CL": 0.4329432479323862,
+        "CD": 0.03506768770815688,
+        "CM": -0.07069556872163275,
+        "CL_alpha": 0.08631367218125963,
+        "CM_alpha": -0.014025522359767395,
+        "static_margin": 0.16249479376006212
+      },
+      "tolerances": {
+        "CL": {
+          "rel": 1e-06
+        },
+        "CD": {
+          "rel": 1e-06
+        },
+        "CM": {
+          "rel": 1e-06
+        },
+        "CL_alpha": {
+          "rel": 0.0001
+        },
+        "CM_alpha": {
+          "rel": 0.0001
+        },
+        "static_margin": {
+          "rel": 0.0001
+        }
+      }
+    },
+    "crm_aero_opt": {
+      "source": "openaerostruct/docs/aero_walkthrough/part_1-7.py",
+      "reference_assertions": "part_7.py: CD=0.033389699871650073, CL=0.5, CM=-1.7885550372372376",
+      "surface_config": {
+        "name": "wing",
+        "wing_type": "CRM",
+        "num_x": 2,
+        "num_y": 7,
+        "num_twist_cp": 5,
+        "symmetry": true,
+        "S_ref_type": "wetted",
+        "t_over_c_cp": [
+          0.15
+        ],
+        "c_max_t": 0.303,
+        "CD0": 0.015,
+        "with_viscous": true,
+        "with_wave": false
+      },
+      "flight_config": {
+        "surfaces": [
+          "wing"
+        ],
+        "velocity": 248.136,
+        "alpha": 5.0,
+        "Mach_number": 0.84,
+        "reynolds_number": 1000000.0,
+        "density": 0.38
+      },
+      "optimization": {
+        "design_variables": [
+          {
+            "name": "twist",
+            "lower": -10.0,
+            "upper": 15.0
+          }
+        ],
+        "constraints": [
+          {
+            "name": "CL",
+            "equals": 0.5
+          }
+        ],
+        "objective": "CD"
+      },
+      "expected": {
+        "CD": 0.03157580550695559,
+        "CL": 0.49999999999989764,
+        "CM": -2.1182832055050334
+      },
+      "tolerances": {
+        "CD": {
+          "rel": 0.0001
+        },
+        "CL": {
+          "rel": 0.0001
+        },
+        "CM": {
+          "rel": 0.0001
+        }
+      }
+    },
+    "crm_aerostruct_opt": {
+      "source": "openaerostruct/examples/run_CRM.py",
+      "surface_config": {
+        "name": "wing",
+        "wing_type": "CRM",
+        "num_x": 2,
+        "num_y": 5,
+        "num_twist_cp": 5,
+        "symmetry": true,
+        "S_ref_type": "wetted",
+        "fem_model_type": "tube",
+        "thickness_cp": [
+          0.3,
+          0.2,
+          0.1
+        ],
+        "t_over_c_cp": [
+          0.15
+        ],
+        "c_max_t": 0.303,
+        "CD0": 0.015,
+        "with_viscous": true,
+        "with_wave": false,
+        "E": 70000000000.0,
+        "G": 30000000000.0,
+        "yield_stress": 500000000.0,
+        "safety_factor": 2.5,
+        "mrho": 3000.0,
+        "wing_weight_ratio": 2.0,
+        "struct_weight_relief": false,
+        "distributed_fuel_weight": false
+      },
+      "flight_config": {
+        "surfaces": [
+          "wing"
+        ],
+        "velocity": 248.136,
+        "alpha": 5.0,
+        "Mach_number": 0.84,
+        "reynolds_number": 1000000.0,
+        "density": 0.38,
+        "W0": 120000.0,
+        "R": 11165000.0,
+        "speed_of_sound": 295.4
+      },
+      "optimization": {
+        "design_variables": [
+          {
+            "name": "twist",
+            "lower": -10.0,
+            "upper": 15.0
+          },
+          {
+            "name": "thickness",
+            "lower": 0.01,
+            "upper": 0.5
+          },
+          {
+            "name": "alpha",
+            "lower": -10.0,
+            "upper": 10.0
+          }
+        ],
+        "constraints": [
+          {
+            "name": "failure",
+            "upper": 0.0
+          },
+          {
+            "name": "thickness_intersects",
+            "upper": 0.0
+          },
+          {
+            "name": "L_equals_W",
+            "equals": 0.0
+          }
+        ],
+        "objective": "fuelburn"
+      },
+      "expected": {
+        "fuelburn": 92523.96360528868,
+        "CL": 0.46782964033436325,
+        "CD": 0.030549828251202685
+      },
+      "tolerances": {
+        "fuelburn": {
+          "rel": 0.0001
+        },
+        "CL": {
+          "rel": 0.001
+        },
+        "CD": {
+          "rel": 0.001
+        }
+      }
+    }
+  }
+}
