@@ -6,6 +6,8 @@ Compare two OAS analysis runs side by side using run_ids.
 
 ## Steps
 
+0. **Start provenance session** — call `start_session(notes="compare_designs workflow")` and save the returned `session_id`.
+
 1. **Identify the two runs** — accept either:
    - Two explicit run_ids from the user
    - "last two runs" → call `list_artifacts` and use the two most recent run_ids
@@ -38,6 +40,10 @@ Compare two OAS analysis runs side by side using run_ids.
 
 6. **Summarize** — 3-5 sentences: what changed, by how much, and what it means
    for the design. Reference the analysis_type context (aero vs aerostruct, cruise vs polar).
+   Call `log_decision(decision_type="result_interpretation", reasoning="<comparison interpretation>", selected_action="<design recommendation>")`.
+
+7. **Export provenance** — call `export_session_graph(session_id=<session_id>)` to capture the
+   comparison reasoning as an audit trail.
 
 ## Output format
 - Markdown table for quantitative metrics

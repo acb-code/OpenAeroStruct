@@ -56,4 +56,4 @@ addopts     = "-v"
 
 [tool.setuptools.package-data]
 openaerostruct = ["tests/*.py", "*/tests/*.py", "*/*/tests/*.py"]
-oas_mcp = ["*.md"]
+oas_mcp = ["*.md", "provenance/viewer/*.html"]

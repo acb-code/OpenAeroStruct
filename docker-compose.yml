@@ -3,6 +3,7 @@ services:
     build: .
     ports:
       - "8000:8000"
+      - "7654:7654"   # Provenance viewer (http://localhost:7654/viewer)
     volumes:
       # Bind-mount ./oas_data on the host into the container.
       # Docker creates the directory automatically if it doesn't exist.
@@ -19,3 +20,5 @@ services:
       OAS_TRANSPORT: http
       OAS_HOST: 0.0.0.0
       OAS_DATA_DIR: /data
+      # Store provenance DB in the bind-mounted volume so it survives container restarts.
+      OAS_PROV_DB: /data/provenance.db

@@ -6,6 +6,8 @@ Run a wing design optimization using the OpenAeroStruct MCP server.
 
 ## Steps
 
+0. **Start provenance session** — call `start_session(notes="optimize_wing workflow")` and save the returned `session_id`.
+
 1. **Check/create surface** — if no surface exists in the session, call `create_surface`
    with appropriate parameters. For aero optimization, `fem_model_type=None` is fine.
    For aerostruct optimization, use `fem_model_type="tube"` with material properties.
@@ -14,7 +16,10 @@ Run a wing design optimization using the OpenAeroStruct MCP server.
    a baseline. Note baseline CL, CD, L/D from `summary.narrative`.
    Save the baseline `run_id` for comparison.
 
-3. **Run optimization** — call `run_optimization` with:
+3. **Record DV selection rationale** — before running optimization, call
+   `log_decision(decision_type="dv_selection", reasoning="<why these DVs and bounds>", selected_action="<DV list>", prior_call_id=<baseline call_id>, confidence="medium")`.
+
+   **Run optimization** — call `run_optimization` with:
    - `objective`: "CD" for aero, "fuelburn" for aerostruct
    - `design_variables`: include `twist` (lower=-10, upper=15) and `alpha` (lower=-5, upper=10)
      For aerostruct: also add `thickness` (lower=0.003, upper=0.25)
@@ -22,6 +27,7 @@ Run a wing design optimization using the OpenAeroStruct MCP server.
 
 4. **Visualize convergence** — call `visualize(run_id, "opt_history")` to see objective convergence.
    Also call `visualize(run_id, "opt_dv_evolution")` if design variables changed significantly.
+   Call `log_decision(decision_type="convergence_assessment", reasoning="<convergence quality assessment>", selected_action="<accept or re-run>", prior_call_id=<opt call_id>)`.
 
 5. **Compare baseline vs optimized** — use `summary.derived_metrics` delta to see improvements.
    Call `visualize(run_id, "opt_comparison")` for a side-by-side DV comparison.
@@ -33,6 +39,9 @@ Run a wing design optimization using the OpenAeroStruct MCP server.
    - Final performance: CL, CD, L/D from `results.final_results`
    - Constraint satisfaction: check CL residual, failure margin
    - Any validation warnings
+
+7. **Export provenance** — call `export_session_graph(session_id=<session_id>)` to capture the
+   full decision audit trail including DV selection rationale and convergence assessment.
 
 ## Decision guide
 - **Minimize drag (aero-only)**: `objective="CD"`, DVs=[twist, alpha], constraints=[CL=target]

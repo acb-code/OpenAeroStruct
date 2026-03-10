@@ -8,6 +8,8 @@ The global artifact store is redirected to a per-test tmp_path so that
 tests never write to the real oas_data/ directory.
 """
 
+import uuid
+
 import pytest
 import pytest_asyncio
 from oas_mcp.server import _artifacts, create_surface, reset
@@ -55,8 +57,20 @@ def isolate_artifacts(tmp_path):
     _artifacts._data_dir = original
 
 
+@pytest.fixture(autouse=True)
+def isolate_provenance(tmp_path):
+    """Redirect provenance DB to a per-test temp file and reset the session ID."""
+    from oas_mcp.provenance.capture import _prov_session_id
+    from oas_mcp.provenance.db import init_db
+
+    init_db(tmp_path / "prov.db")
+    token = _prov_session_id.set(f"test-{uuid.uuid4().hex[:8]}")
+    yield
+    _prov_session_id.reset(token)
+
+
 @pytest_asyncio.fixture(autouse=True)
-async def clean_session():
+async def clean_session(isolate_provenance):
     """Reset the global session before every test."""
     await reset()
     yield

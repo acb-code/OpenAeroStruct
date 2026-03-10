@@ -137,3 +137,40 @@ Step 2 — analyse both together:
 NOTE: All *_cp arrays (twist_cp, chord_cp, thickness_cp, etc.) are ordered
   ROOT-to-TIP: cp[0]=root, cp[-1]=tip.  This applies to both inputs and the
   optimized_design_variables output from run_optimization.
+
+---
+## Provenance Tracking
+
+The server records every tool call automatically (Tier 1).  Use the three
+provenance tools to add Tier 2 explicit reasoning capture.
+
+### Pattern for all workflows A-E
+
+Step 0 — at the start of any workflow:
+  start_session(notes="<brief description>")
+  → returns {session_id, started_at}; the session is now active
+
+At decision points (before/after major steps):
+  log_decision(
+      decision_type="mesh_resolution"|"dv_selection"|"constraint_choice"|"result_interpretation",
+      reasoning="<why this choice>",
+      selected_action="<what was chosen>",
+      prior_call_id="<call_id from _provenance in previous tool result>",  # optional
+      confidence="high"|"medium"|"low"
+  )
+  → returns {decision_id}
+
+Final step — export the audit trail:
+  export_session_graph(
+      session_id="<session_id from step 0>",
+      output_path="<workflow_name>_provenance.json"   # optional
+  )
+  → returns {session, nodes, edges, path}
+
+### Viewer
+
+Open oas_mcp/provenance/viewer/index.html in a browser.
+  • Drop the exported JSON file onto the page, OR
+  • Connect live: http://127.0.0.1:7654/viewer (started automatically with the server)
+  • Click any node to inspect inputs/outputs or reasoning
+  • Toggle FSM mode to collapse repeated tool calls into state transitions
