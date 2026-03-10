@@ -8,6 +8,12 @@ OpenAeroStruct
 > - **MCP Server** — Complete (`oas_mcp/`). Exposes core OAS capabilities (surface creation, aero/aerostruct analysis, drag polars, stability derivatives, optimization) as structured tools consumable by any MCP-compatible AI agent.
 > - **Observability & Trust** — Complete. Every analysis tool returns a versioned response envelope with automatic physics validation, structured telemetry, and a `run_id` for all follow-up operations. New tools: `get_run`, `pin_run`, `unpin_run`, `get_detailed_results`, `visualize`, `get_last_logs`, `configure_session`, `set_requirements`. See [`oas_mcp/observability.md`](oas_mcp/observability.md) and [`oas_mcp/visualization.md`](oas_mcp/visualization.md).
 > - **Golden Regression Tests** — Complete. Physics invariant tests (`test_golden_physics.py`) assert CD > 0, CL monotone with α, structural mass positive, and optimizer convergence on any platform. Numeric baseline tests compare stored reference values.
+>
+> **Steps to run the MCP server**
+> - Start the server locally: `docker compose build && docker compose up -d`
+> - Watch logs: `docker compose logs -f`
+> - Bring down the server: `docker compose down`
+> - In a separate terminal, expose the port to a website: `ngrok http 8000`, use ctrl+C to stop when desired
 
 [![Build Status](https://dev.azure.com/mdolab/Public/_apis/build/status%2Fmdolab.OpenAeroStruct?repoName=mdolab%2FOpenAeroStruct&branchName=main)](https://dev.azure.com/mdolab/Public/_build/latest?definitionId=49&repoName=mdolab%2FOpenAeroStruct&branchName=main)
 [![codecov](https://codecov.io/gh/mdolab/OpenAeroStruct/branch/main/graph/badge.svg?token=yOxeH7rT2H)](https://codecov.io/gh/mdolab/OpenAeroStruct)
