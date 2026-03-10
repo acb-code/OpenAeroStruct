@@ -72,6 +72,9 @@ from .core.validation import (
 )
 from .core.artifacts import ArtifactStore, _make_run_id
 from .core.auth import build_auth_settings, build_token_verifier, get_current_user
+from .provenance.db import init_db as _prov_init_db, record_session as _prov_record_session
+from .provenance.capture import capture_tool, _prov_session_id
+from .provenance import tools as _prov_tools
 from .core.session import SessionManager
 from .core.validators import (
     validate_fem_model_type,
@@ -176,11 +179,24 @@ CONSTRAINT NAMES FOR run_optimization:
   • Tube only:      'thickness_intersects'  (NOT available for wingbox — raises an error)
 
 Use the prompts (analyze_wing, aerostructural_design, optimize_wing, compare_designs) for guided
-workflows, and the resources (oas://reference, oas://workflows) for quick lookup.""",
+workflows, and the resources (oas://reference, oas://workflows) for quick lookup.
+
+PROVENANCE & DECISION LOGGING:
+  • start_session(notes)           — begin a named provenance session; call at workflow start
+  • log_decision(type, reasoning, selected_action, prior_call_id?, confidence?) — record why
+  • export_session_graph(session_id?, output_path?) — export DAG as JSON; load into viewer""",
 )
 
 _sessions = SessionManager()
 _artifacts = ArtifactStore()
+
+# ---------------------------------------------------------------------------
+# Provenance tools registration
+# ---------------------------------------------------------------------------
+
+mcp.tool()(_prov_tools.start_session)
+mcp.tool()(_prov_tools.log_decision)
+mcp.tool()(_prov_tools.export_session_graph)
 
 # ---------------------------------------------------------------------------
 # MCP Apps widget resource
@@ -398,6 +414,7 @@ def _is_cp_dv(name: str) -> bool:
 
 
 @mcp.tool()
+@capture_tool
 async def create_surface(
     name: Annotated[str, "Unique surface name (e.g. 'wing', 'tail')"] = "wing",
     wing_type: Annotated[str, "Mesh type: 'rect', 'CRM', or 'uCRM_based'"] = "rect",
@@ -587,6 +604,7 @@ async def create_surface(
 
 
 @mcp.tool()
+@capture_tool
 async def run_aero_analysis(
     surfaces: Annotated[list[str], "Names of surfaces to include (must have been created via create_surface)"],
     velocity: Annotated[float, "Free-stream velocity in m/s"] = 248.136,
@@ -667,6 +685,7 @@ async def run_aero_analysis(
 
 
 @mcp.tool()
+@capture_tool
 async def run_aerostruct_analysis(
     surfaces: Annotated[list[str], "Names of surfaces (must have fem_model_type set)"],
     velocity: Annotated[float, "Free-stream velocity in m/s"] = 248.136,
@@ -768,6 +787,7 @@ async def run_aerostruct_analysis(
 
 
 @mcp.tool()
+@capture_tool
 async def compute_drag_polar(
     surfaces: Annotated[list[str], "Names of surfaces to include"],
     alpha_start: Annotated[float, "Starting angle of attack in degrees"] = -5.0,
@@ -864,6 +884,7 @@ async def compute_drag_polar(
 
 
 @mcp.tool()
+@capture_tool
 async def compute_stability_derivatives(
     surfaces: Annotated[list[str], "Names of surfaces to include"],
     alpha: Annotated[float, "Angle of attack in degrees"] = 5.0,
@@ -1003,6 +1024,7 @@ async def compute_stability_derivatives(
 
 
 @mcp.tool()
+@capture_tool
 async def run_optimization(
     surfaces: Annotated[list[str], "Names of surfaces to use"],
     analysis_type: Annotated[str, "Analysis type: 'aero' or 'aerostruct'"] = "aero",
@@ -1274,6 +1296,7 @@ async def run_optimization(
 
 
 @mcp.tool()
+@capture_tool
 async def reset(
     session_id: Annotated[str | None, "Session to reset, or None to reset all sessions"] = None,
 ) -> dict:
@@ -1297,6 +1320,7 @@ async def reset(
 
 
 @mcp.tool()
+@capture_tool
 async def list_artifacts(
     session_id: Annotated[str | None, "Filter by session ID, or None to list all sessions"] = None,
     analysis_type: Annotated[
@@ -1317,6 +1341,7 @@ async def list_artifacts(
 
 
 @mcp.tool()
+@capture_tool
 async def get_artifact(
     run_id: Annotated[str, "Run ID returned by an analysis tool"],
     session_id: Annotated[
@@ -1331,6 +1356,7 @@ async def get_artifact(
 
 
 @mcp.tool()
+@capture_tool
 async def get_artifact_summary(
     run_id: Annotated[str, "Run ID returned by an analysis tool"],
     session_id: Annotated[str | None, "Session that owns this artifact"] = None,
@@ -1347,6 +1373,7 @@ async def get_artifact_summary(
 
 
 @mcp.tool()
+@capture_tool
 async def delete_artifact(
     run_id: Annotated[str, "Run ID to delete"],
     session_id: Annotated[str | None, "Session that owns this artifact"] = None,
@@ -1364,6 +1391,7 @@ async def delete_artifact(
 
 
 @mcp.tool()
+@capture_tool
 async def get_run(
     run_id: Annotated[str, "Run ID to inspect"],
     session_id: Annotated[str | None, "Session hint for faster lookup"] = None,
@@ -1442,6 +1470,7 @@ async def get_run(
 
 
 @mcp.tool()
+@capture_tool
 async def pin_run(
     run_id: Annotated[str, "Run ID whose cached problem to pin"],
     surfaces: Annotated[list[str], "Surface names used in this run"],
@@ -1468,6 +1497,7 @@ async def pin_run(
 
 
 @mcp.tool()
+@capture_tool
 async def unpin_run(
     run_id: Annotated[str, "Run ID to unpin"],
     session_id: Annotated[str, "Session identifier"] = "default",
@@ -1487,6 +1517,7 @@ async def unpin_run(
 
 
 @mcp.tool()
+@capture_tool
 async def get_detailed_results(
     run_id: Annotated[str, "Run ID to retrieve details for"],
     detail_level: Annotated[
@@ -1534,6 +1565,7 @@ async def get_detailed_results(
 
 
 @mcp.tool(meta={"ui": {"resourceUri": _WIDGET_URI}})
+@capture_tool
 async def visualize(
     run_id: Annotated[str, "Run ID to visualize"],
     plot_type: Annotated[
@@ -1659,6 +1691,7 @@ async def visualize(
 
 
 @mcp.tool()
+@capture_tool
 async def get_n2_html(
     run_id: Annotated[str, "Run ID whose N2 diagram to fetch"],
     session_id: Annotated[str | None, "Session hint for faster artifact lookup"] = None,
@@ -1694,6 +1727,7 @@ async def get_n2_html(
 
 
 @mcp.tool()
+@capture_tool
 async def get_last_logs(
     run_id: Annotated[str, "Run ID to retrieve server-side logs for"],
 ) -> dict:
@@ -1716,6 +1750,7 @@ async def get_last_logs(
 
 
 @mcp.tool()
+@capture_tool
 async def configure_session(
     session_id: Annotated[str, "Session to configure"] = "default",
     default_detail_level: Annotated[
@@ -1813,6 +1848,7 @@ async def configure_session(
 
 
 @mcp.tool()
+@capture_tool
 async def set_requirements(
     requirements: Annotated[
         list[dict],
@@ -2144,6 +2180,33 @@ def main():
         help="Bind port for HTTP transport (default: 8000)",
     )
     args = parser.parse_args()
+
+    # --- Provenance setup ---
+    _prov_init_db()
+    import uuid as _uuid
+    _auto_sid = f"auto-{_uuid.uuid4().hex[:8]}"
+    _prov_session_id.set(_auto_sid)
+    _prov_record_session(_auto_sid, notes="Auto-created on server startup")
+    try:
+        import sys as _sys
+        from .provenance.viewer_server import start_viewer_server as _start_viewer
+        _prov_port = _start_viewer()
+        if _prov_port:
+            _sep = "─" * 54
+            print(f"\n{_sep}", file=_sys.stderr)
+            print("  OAS Provenance Viewer", file=_sys.stderr)
+            print(_sep, file=_sys.stderr)
+            print(f"  Viewer    http://localhost:{_prov_port}/viewer", file=_sys.stderr)
+            print(f"            Interactive DAG — load any session from the", file=_sys.stderr)
+            print(f"            drop-down or drop an exported JSON file.", file=_sys.stderr)
+            print(f"  Sessions  http://localhost:{_prov_port}/sessions", file=_sys.stderr)
+            print(f"            JSON list of all recorded provenance sessions.", file=_sys.stderr)
+            print(f"  Plot API  http://localhost:{_prov_port}/plot?run_id=<id>&plot_type=<type>", file=_sys.stderr)
+            print(f"            Render a saved analysis run as a PNG image.", file=_sys.stderr)
+            print(_sep + "\n", file=_sys.stderr)
+    except Exception:
+        pass
+    # --- End provenance setup ---
 
     if args.transport == "http":
         try:
