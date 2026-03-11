@@ -135,5 +135,5 @@ def capture_tool(fn):
                 pass  # Never swallow the original exception
 
     # Preserve the original function's signature for FastMCP introspection
-    wrapper.__signature__ = inspect.signature(fn)
+    wrapper.__signature__ = inspect.signature(fn, eval_str=True)
     return wrapper

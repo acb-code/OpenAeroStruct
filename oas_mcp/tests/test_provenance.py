@@ -179,7 +179,8 @@ def test_capture_decorator_preserves_signature(tmp_path):
         return {}
 
     wrapped = capture_tool(my_tool)
-    assert inspect.signature(wrapped) == inspect.signature(my_tool)
+    # eval_str=True resolves PEP 563 string annotations to actual types
+    assert inspect.signature(wrapped) == inspect.signature(my_tool, eval_str=True)
 
 
 @pytest.mark.asyncio
