@@ -383,6 +383,22 @@ def build_optimization_problem(
 
     prob.setup(force_alloc_complex=False)
 
+    # Explicitly set surface-level array initial values so that any early
+    # prob.get_val() calls (e.g. in OptimizationTracker.record_initial) do not
+    # trigger OpenMDAO finalization with default values (1.0) instead of the
+    # values from the surface dict, which would shift the optimizer's starting
+    # point and lead to a different local optimum.
+    _cp_keys = ("twist_cp", "thickness_cp", "t_over_c_cp",
+                 "spar_thickness_cp", "skin_thickness_cp")
+    for surface in surfaces:
+        sname = surface["name"]
+        for key in _cp_keys:
+            if key in surface:
+                try:
+                    prob.set_val(f"{sname}.{key}", surface[key])
+                except Exception:
+                    pass
+
     # Set initial values
     if analysis_type == "aero":
         _set_initial_values_aero(
