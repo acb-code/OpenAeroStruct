@@ -139,8 +139,8 @@ class OIDCTokenVerifier:
 
         try:
             claims = await asyncio.to_thread(self.verify, token)
-        except Exception:
-            logger.warning("Token verification failed", exc_info=True)
+        except Exception as exc:
+            logger.warning("Token verification failed: %s", type(exc).__name__)
             return None
 
         # Scope check: reject tokens that don't include the required mcp:tools scope.

@@ -81,6 +81,7 @@ from .core.validators import (
     validate_flight_conditions,
     validate_flight_points,
     validate_mesh_params,
+    validate_safe_name,
     validate_struct_props_present,
     validate_surface_names_exist,
     validate_wing_type,
@@ -1327,7 +1328,6 @@ async def list_artifacts(
         str | None,
         "Filter by type: 'aero', 'aerostruct', 'drag_polar', 'stability', 'optimization'",
     ] = None,
-    user: Annotated[str | None, "Filter by user identity (default: all users)"] = None,
     project: Annotated[str | None, "Filter by project name (default: all projects)"] = None,
 ) -> dict:
     """List saved analysis artifacts with optional filters.
@@ -1335,7 +1335,10 @@ async def list_artifacts(
     Returns a count and a list of index entries (run_id, session_id,
     analysis_type, timestamp, surfaces, tool_name).  Does not load the
     full results payload — use get_artifact for that.
+
+    Results are scoped to the authenticated user — you cannot list other users' artifacts.
     """
+    user = get_current_user()
     entries = await asyncio.to_thread(_artifacts.list, session_id, analysis_type, user, project)
     return {"count": len(entries), "artifacts": entries}
 
@@ -1348,8 +1351,12 @@ async def get_artifact(
         str | None, "Session that owns this artifact — speeds up lookup when provided"
     ] = None,
 ) -> dict:
-    """Retrieve a saved artifact (metadata + full results) by run_id."""
-    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id)
+    """Retrieve a saved artifact (metadata + full results) by run_id.
+
+    Scoped to the authenticated user — you cannot access other users' artifacts.
+    """
+    user = get_current_user()
+    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id, user)
     if artifact is None:
         raise ValueError(f"Artifact '{run_id}' not found")
     return artifact
@@ -1365,8 +1372,11 @@ async def get_artifact_summary(
 
     Returns: run_id, session_id, analysis_type, timestamp, surfaces,
     tool_name, parameters.
+
+    Scoped to the authenticated user.
     """
-    summary = await asyncio.to_thread(_artifacts.get_summary, run_id, session_id)
+    user = get_current_user()
+    summary = await asyncio.to_thread(_artifacts.get_summary, run_id, session_id, user)
     if summary is None:
         raise ValueError(f"Artifact '{run_id}' not found")
     return summary
@@ -1378,8 +1388,12 @@ async def delete_artifact(
     run_id: Annotated[str, "Run ID to delete"],
     session_id: Annotated[str | None, "Session that owns this artifact"] = None,
 ) -> dict:
-    """Permanently delete a saved artifact from disk."""
-    deleted = await asyncio.to_thread(_artifacts.delete, run_id, session_id)
+    """Permanently delete a saved artifact from disk.
+
+    Scoped to the authenticated user — you cannot delete other users' artifacts.
+    """
+    user = get_current_user()
+    deleted = await asyncio.to_thread(_artifacts.delete, run_id, session_id, user)
     if not deleted:
         raise ValueError(f"Artifact '{run_id}' not found")
     return {"status": "deleted", "run_id": run_id}
@@ -1401,8 +1415,11 @@ async def get_run(
     This is the primary 'what do I know about this run?' endpoint for agents.
     It answers: what inputs were used, what came out, did it pass validation,
     is the problem still cached, and what plot types are available.
+
+    Scoped to the authenticated user.
     """
-    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id)
+    user = get_current_user()
+    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id, user)
     if artifact is None:
         raise ValueError(f"Run '{run_id}' not found in artifact store.")
 
@@ -1534,8 +1551,11 @@ async def get_detailed_results(
     persisted in the artifact so they survive cache eviction.
 
     'summary' returns only the top-level scalars (CL, CD, etc.).
+
+    Scoped to the authenticated user.
     """
-    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id)
+    user = get_current_user()
+    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id, user)
     if artifact is None:
         raise ValueError(f"Run '{run_id}' not found.")
 
@@ -1594,6 +1614,8 @@ async def visualize(
       opt_dv_evolution    — design variable evolution over iterations (optimization only)
       opt_comparison      — before/after DV comparison: initial vs optimized values
       n2                  — interactive N2/DSM diagram (saves HTML to disk, returns metadata with file_path)
+
+    Scoped to the authenticated user.
     """
     if plot_type not in PLOT_TYPES:
         raise ValueError(
@@ -1601,7 +1623,8 @@ async def visualize(
             f"Supported: {sorted(PLOT_TYPES)}"
         )
 
-    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id)
+    user = get_current_user()
+    artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id, user)
     if artifact is None:
         raise ValueError(f"Run '{run_id}' not found.")
 
@@ -1830,6 +1853,7 @@ async def configure_session(
         updates["telemetry_mode"] = telemetry_mode
 
     if project is not None:
+        validate_safe_name(project, "project")
         updates["project"] = project
 
     if updates:

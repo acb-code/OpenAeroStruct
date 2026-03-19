@@ -22,7 +22,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import re
+
 import numpy as np
+
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-. ]+$")
+
+
+def _validate_path_segment(value: str, label: str) -> None:
+    """Reject path-traversal characters in user-supplied path segments."""
+    if ".." in value or "/" in value or "\\" in value:
+        raise ValueError(f"{label} contains unsafe characters: {value!r}")
+    if not _SAFE_NAME_RE.match(value):
+        raise ValueError(f"{label} contains invalid characters: {value!r}")
 
 
 def _default_data_dir() -> Path:
@@ -47,7 +59,7 @@ class _NumpyEncoder(json.JSONEncoder):
 def _make_run_id() -> str:
     """Return a sortable, collision-resistant run ID: ``YYYYMMDDTHHMMSS_xxxx``."""
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    suffix = secrets.token_hex(2)  # 4 hex chars
+    suffix = secrets.token_hex(8)  # 16 hex chars
     return f"{ts}_{suffix}"
 
 
@@ -75,6 +87,12 @@ class ArtifactStore:
     # ------------------------------------------------------------------
 
     def _session_dir(self, user: str, project: str, session_id: str) -> Path:
+        _validate_path_segment(user, "user")
+        _validate_path_segment(project, "project")
+        _validate_path_segment(session_id, "session_id")
+        resolved = (self._data_dir / user / project / session_id).resolve()
+        if not str(resolved).startswith(str(self._data_dir.resolve())):
+            raise ValueError("Path escapes data directory")
         return self._data_dir / user / project / session_id
 
     def _artifact_path(self, user: str, project: str, session_id: str, run_id: str) -> Path:

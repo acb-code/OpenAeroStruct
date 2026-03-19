@@ -13,4 +13,5 @@ oas_data/
 *.jsonl
 *.tmp
 .env
+.env.*
 env.example

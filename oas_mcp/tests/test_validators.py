@@ -7,6 +7,7 @@ from oas_mcp.core.validators import (
     validate_flight_points,
     validate_mesh_params,
     validate_positive,
+    validate_safe_name,
     validate_struct_props_present,
     validate_wing_type,
 )
@@ -155,3 +156,36 @@ class TestValidateStructProps:
         }
         with pytest.raises(ValueError, match="fem_model_type"):
             validate_struct_props_present(surface)
+
+
+class TestValidateSafeName:
+    """Tests for path traversal prevention in user-supplied names."""
+
+    def test_simple_name_passes(self):
+        validate_safe_name("my-project", "project")
+
+    def test_name_with_spaces_passes(self):
+        validate_safe_name("my project 2024", "project")
+
+    def test_name_with_dots_passes(self):
+        validate_safe_name("v1.2.3", "project")
+
+    def test_dotdot_rejected(self):
+        with pytest.raises(ValueError, match="must not contain"):
+            validate_safe_name("../../etc", "project")
+
+    def test_slash_rejected(self):
+        with pytest.raises(ValueError, match="invalid characters"):
+            validate_safe_name("foo/bar", "project")
+
+    def test_backslash_rejected(self):
+        with pytest.raises(ValueError, match="invalid characters"):
+            validate_safe_name("foo\\bar", "project")
+
+    def test_empty_rejected(self):
+        with pytest.raises(ValueError, match="must not be empty"):
+            validate_safe_name("", "session_id")
+
+    def test_dotdot_in_middle_rejected(self):
+        with pytest.raises(ValueError, match="must not contain"):
+            validate_safe_name("foo..bar", "project")

@@ -105,6 +105,28 @@ def validate_flight_points(flight_points: list[dict]) -> None:
             raise ValueError(f"flight_points[{i}].speed_of_sound must be positive, got {fp['speed_of_sound']}")
 
 
+import re
+
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-. ]+$")
+
+
+def validate_safe_name(value: str, label: str) -> None:
+    """Reject path-traversal characters in user-supplied path segments.
+
+    Raises ``ValueError`` if *value* contains ``..``, ``/``, ``\\``,
+    or characters outside a conservative allowlist.
+    """
+    if not value:
+        raise ValueError(f"{label} must not be empty")
+    if ".." in value:
+        raise ValueError(f"{label} must not contain '..' (got {value!r})")
+    if not _SAFE_NAME_RE.match(value):
+        raise ValueError(
+            f"{label} contains invalid characters (got {value!r}). "
+            f"Allowed: letters, digits, underscore, hyphen, dot, space."
+        )
+
+
 def validate_struct_props_present(surface: dict) -> None:
     """Ensure structural properties are present for aerostruct analysis."""
     required = ["E", "G", "yield", "mrho", "fem_model_type"]

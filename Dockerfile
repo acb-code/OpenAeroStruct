@@ -14,6 +14,10 @@ COPY . .
 # Install the package with MCP + HTTP transport dependencies (uvicorn, PyJWT, httpx)
 RUN pip install --no-cache-dir ".[http]"
 
+# Create non-root user for runtime
+RUN useradd -r -s /usr/sbin/nologin oas && \
+    mkdir -p /data && chown oas:oas /data
+
 # Artifact storage root inside the container (bind-mounted from host ./oas_data)
 ENV OAS_DATA_DIR=/data
 
@@ -23,5 +27,7 @@ ENV OAS_TRANSPORT=stdio
 VOLUME /data
 
 EXPOSE 8000
+
+USER oas
 
 ENTRYPOINT ["oas-mcp"]

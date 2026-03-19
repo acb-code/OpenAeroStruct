@@ -319,3 +319,63 @@ def test_rebuild_index_deduplicates(store, tmp_path):
     entries = store.list(session_id="s1")
     matching = [e for e in entries if e["run_id"] == pre_id]
     assert len(matching) == 1
+
+
+# ---------------------------------------------------------------------------
+# path traversal prevention
+# ---------------------------------------------------------------------------
+
+
+def test_path_traversal_in_project_rejected(store):
+    with pytest.raises(ValueError, match="unsafe characters"):
+        store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {},
+                   user="alice", project="../../etc")
+
+
+def test_path_traversal_in_session_id_rejected(store):
+    with pytest.raises(ValueError, match="unsafe characters"):
+        store.save("../../../tmp", "aero", "run_aero_analysis", ["wing"], {}, {},
+                   user="alice", project="default")
+
+
+def test_slash_in_user_rejected(store):
+    with pytest.raises(ValueError, match="unsafe characters"):
+        store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {},
+                   user="alice/bob", project="default")
+
+
+# ---------------------------------------------------------------------------
+# run_id entropy
+# ---------------------------------------------------------------------------
+
+
+def test_run_id_has_sufficient_entropy():
+    """run_id suffix should be at least 16 hex chars (8 bytes)."""
+    rid = _make_run_id()
+    suffix = rid.split("_", 1)[1]
+    assert len(suffix) >= 16
+
+
+# ---------------------------------------------------------------------------
+# user scoping
+# ---------------------------------------------------------------------------
+
+
+def test_get_scoped_to_user(store):
+    """get() with user filter cannot access another user's artifact."""
+    rid = store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {"CL": 0.5},
+                     user="alice", project="p1")
+    # alice can access
+    assert store.get(rid, user="alice") is not None
+    # bob cannot
+    assert store.get(rid, user="bob") is None
+
+
+def test_delete_scoped_to_user(store):
+    """delete() with user filter cannot delete another user's artifact."""
+    rid = store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {},
+                     user="alice", project="p1")
+    # bob's delete fails
+    assert store.delete(rid, user="bob") is False
+    # artifact still exists for alice
+    assert store.get(rid, user="alice") is not None
