@@ -185,6 +185,45 @@ Add as a remote MCP server in claude.ai settings:
 - claude.ai will discover the auth server via `/.well-known/oauth-protected-resource`,
   register via DCR, and present the Keycloak login page.
 
+## 8. Adding new users
+
+### Admin steps
+
+1. Open **https://auth.lakesideai.dev** → log in as admin → switch to the **oas** realm
+2. **Users → Add user** → fill in username, email, first/last name → **Create**
+3. **Credentials** tab → **Set password** → uncheck "Temporary" → **Save**
+4. Send the new user their username, temporary password, and the instructions below
+
+### Instructions to send new users
+
+> **OpenAeroStruct MCP Server — Getting Started**
+>
+> You've been given access to the OAS MCP server. Here's how to connect:
+>
+> **Your credentials**
+> - Login URL: https://auth.lakesideai.dev
+> - Username: `<their-username>`
+> - Password: `<their-password>`
+>
+> **Option 1: Claude Code (CLI)**
+>
+> 1. Install Claude Code if you haven't: `npm install -g @anthropic-ai/claude-code`
+> 2. Add the MCP server:
+>    ```bash
+>    claude mcp add --transport http oas-mcp https://mcp.lakesideai.dev/mcp
+>    ```
+> 3. Start a Claude Code session. The first time you use an OAS tool,
+>    your browser will open for login. Sign in with your credentials above.
+> 4. After login you can ask Claude to run aerostructural analyses,
+>    optimizations, and more — all tools are available automatically.
+>
+> **Option 2: claude.ai (web)**
+>
+> 1. Go to https://claude.ai → **Settings → Integrations → Add MCP Server**
+> 2. Enter URL: `https://mcp.lakesideai.dev/mcp`
+> 3. You'll be redirected to sign in with your credentials above.
+> 4. The OAS tools will appear in your Claude conversation.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
