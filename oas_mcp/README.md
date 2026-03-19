@@ -5,7 +5,8 @@ An [MCP](https://modelcontextprotocol.io) server that wraps [OpenAeroStruct](htt
 ## Contents
 
 - [Overview](#overview)
-- [Installation](#installation)
+- [Quick start (Docker)](#quick-start-docker)
+- [Installation (from source)](#installation-from-source)
 - [CLI (`oas-cli`)](#cli-oas-cli)
   - [Installation](#cli-installation)
   - [Gotchas](#cli-gotchas)
@@ -16,7 +17,6 @@ An [MCP](https://modelcontextprotocol.io) server that wraps [OpenAeroStruct](htt
 - [Running the server](#running-the-server)
   - [stdio (Claude Desktop)](#stdio-transport-default--for-claude-desktop-and-most-mcp-clients)
   - [HTTP transport](#http-transport)
-  - [Docker](#docker)
 - [Running the tests](#running-the-tests)
 - [Artifact storage](#artifact-storage)
 - [Response envelope](#response-envelope)
@@ -26,7 +26,6 @@ An [MCP](https://modelcontextprotocol.io) server that wraps [OpenAeroStruct](htt
 - [Architecture](#architecture)
 - [Tools reference](#tools-reference)
 - [Example walkthrough](#example-walkthrough)
-- [Usage capabilities at a glance](#usage-capabilities-at-a-glance)
 - [Tips](#tips)
 
 ---
@@ -79,7 +78,94 @@ Setting up an OpenAeroStruct analysis normally requires 50–100 lines of OpenMD
 
 ---
 
-## Installation
+## Quick start (Docker)
+
+Docker is the easiest way to deploy the server. No Python environment setup required.
+
+### Start the server
+
+```bash
+docker compose up -d
+```
+
+This starts the `oas-mcp` service on port 8000 with persistent artifact storage via a named volume (`oas-data`).
+
+```bash
+docker compose logs -f    # watch logs
+docker compose down       # stop the server
+```
+
+### Connect from Claude Code
+
+Add to your Claude Code MCP config:
+
+```json
+{
+  "mcpServers": {
+    "openaerostruct": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"]
+    }
+  }
+}
+```
+
+### Connect from Claude.ai
+
+1. Claude.ai → Settings → Integrations → **Add Integration**
+2. Type: **Remote MCP Server**
+3. URL: `https://your-server.example.com/mcp`
+4. OAuth Client ID: `oas-mcp` / OAuth Client Secret: *(from Keycloak)*
+
+See [keycloak_setup.md](keycloak_setup.md) for the full authentication setup guide.
+
+### Production deployment
+
+For multi-user hosting with Keycloak authentication and a Caddy reverse proxy:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+See [keycloak_setup.md](keycloak_setup.md) for the complete production deployment walkthrough, including Keycloak realm configuration, TLS, and user onboarding.
+
+### What the server can do
+
+The server supports a full analysis loop: define geometry, run aerodynamic/aerostructural analyses, optimize design variables, and inspect convergence trends and resulting wing-state changes.
+
+![NTX-320 usage overview dashboard](images/usage_overview_top.png)
+
+![NTX-320 optimization convergence view](images/usage_optimization_history.png)
+
+### Verify the server is running
+
+```bash
+curl -s http://localhost:8000/mcp \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}'
+```
+
+You should receive an SSE response containing `serverInfo: {name: "OpenAeroStruct", ...}`.
+
+### Customise the deployment
+
+Override environment variables in `docker-compose.yml` or with `-e` flags:
+
+```bash
+docker run -p 8000:8000 -v oas-data:/data \
+  -e OAS_TRANSPORT=http \
+  -e OAS_DATA_DIR=/data/artifacts \
+  -e KEYCLOAK_ISSUER_URL=https://your-keycloak.example.com/realms/oas \
+  oas-mcp
+```
+
+---
+
+## Installation (from source)
+
+For local development or running the server without Docker.
 
 ### Prerequisites
 
@@ -327,18 +413,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Replace `/path/to/.venv` with the absolute path to the virtual environment where you installed the package. On Linux with the repository's `.venv`:
-
-```json
-{
-  "mcpServers": {
-    "openaerostruct": {
-      "command": "/home/alex/coding/OpenAeroStruct/.venv/bin/python",
-      "args": ["-m", "oas_mcp.server"]
-    }
-  }
-}
-```
+Replace `/path/to/.venv` with the absolute path to the virtual environment where you installed the package.
 
 Restart Claude Desktop after saving the config file. The server should appear in the MCP panel.
 
@@ -384,41 +459,9 @@ INFO:     Uvicorn running on http://127.0.0.1:8000
 
 Point your MCP client at `http://127.0.0.1:8000/mcp`.
 
-#### Step 4 — (Optional) Expose via ngrok for Claude.ai
+#### Step 4 — (Optional) Local development tunneling
 
-Claude.ai requires a **public HTTPS URL** to connect to your MCP server. ngrok
-creates a secure tunnel from a public URL to your local server in one command.
-
-```bash
-# Install ngrok (Linux / WSL — one-time):
-curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok-v3-stable-linux-amd64.tgz \
-  | sudo tar xvz -C /usr/local/bin
-ngrok authtoken <your-ngrok-token>   # free account at ngrok.com
-
-# Expose the running MCP server:
-ngrok http 8000
-# Note the HTTPS URL: https://xxxx-xx-xx-xx-xx.ngrok-free.app
-```
-
-Update `RESOURCE_SERVER_URL` in `.env` to the ngrok URL:
-
-```dotenv
-RESOURCE_SERVER_URL=https://xxxx-xx-xx-xx-xx.ngrok-free.app
-```
-
-Restart the server to pick up the new value, then add the connector in Claude.ai:
-
-1. Claude.ai → Settings → Integrations → **Add Integration**
-2. Type: **Remote MCP Server**
-3. URL: `https://xxxx-xx-xx-xx-xx.ngrok-free.app/mcp`
-4. OAuth Client ID: `oas-mcp` / OAuth Client Secret: *(from Keycloak)*
-
-See `oas_mcp/keycloak_auth_setup.md` step 10 for the full walkthrough including
-Keycloak Standard flow setup and test user creation.
-
-> **ngrok URL changes on every restart.** Update `RESOURCE_SERVER_URL`, restart
-> the server, and update the Claude.ai connector URL each time. A paid ngrok plan
-> gives a stable custom domain.
+> **Local development tunneling:** If you're running the server locally and need a public HTTPS URL (e.g., for claude.ai), you can use a tunnel like [ngrok](https://ngrok.com) (`ngrok http 8000`) or Cloudflare Tunnel. Set `RESOURCE_SERVER_URL` in `.env` to the tunnel URL and restart the server. For production use, deploy with Docker and a reverse proxy (see [Quick start](#quick-start-docker)).
 
 #### Step 5 — (Optional) Enable Keycloak authentication
 
@@ -445,84 +488,7 @@ source .env && oas-mcp --transport http
 
 When `KEYCLOAK_ISSUER_URL` is set the server validates RS256 JWTs on every request. Requests without a valid Bearer token receive `401 Unauthorized`.
 
----
-
-### Docker
-
-Docker is the easiest way to deploy the HTTP server with persistent artifact storage.
-
-#### Step 1 — Build the image
-
-```bash
-docker build -t oas-mcp .
-```
-
-#### Step 2 — Start the server
-
-```bash
-docker compose up
-```
-
-This starts the `oas-mcp` service on port 8000 with a named volume (`oas-data`) mounted at `/data`. Artifacts are stored under `/data/artifacts` inside the container and persist across restarts.
-
-#### Step 3 — Verify the server is running
-
-```bash
-curl -s -X POST \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}' \
-  http://localhost:8000/mcp
-```
-
-You should receive an SSE response containing `serverInfo: {name: "OpenAeroStruct", ...}`.
-
-> **Note:** A plain `curl http://localhost:8000/mcp` returns `406 Not Acceptable` (correct — the server requires `Accept: text/event-stream`) and a POST without a session ID returns `400 Bad Request: Missing session ID`. Both indicate the server is running normally.
-
-#### Step 4 — Connect from Claude Desktop (HTTP mode)
-
-**Windows with WSL** — use the absolute path to `npx` inside WSL. Do not use `export PATH=.../bin:$PATH` — the inherited Windows `PATH` has entries with spaces (`Program Files`) that cause bash to misparse the `export` command. Use `which npx` in your WSL terminal to find the correct absolute path:
-
-```json
-{
-  "mcpServers": {
-    "openaerostruct": {
-      "command": "wsl",
-      "args": [
-        "bash", "-c",
-        "/home/alex/.nvm/versions/node/v24.12.0/bin/npx -y mcp-remote http://localhost:8000/mcp"
-      ]
-    }
-  }
-}
-```
-
-**macOS / Linux:**
-
-```json
-{
-  "mcpServers": {
-    "openaerostruct": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"]
-    }
-  }
-}
-```
-
-If Keycloak auth is enabled, see `oas_mcp/keycloak_auth_setup.md` step 9 for Claude Desktop auth options (stdio recommended for local dev; mcp-remote with OAuth or dynamic token fetch for HTTP).
-
-#### Customise the Docker deployment
-
-Override environment variables in `docker-compose.yml` or with `-e` flags:
-
-```bash
-docker run -p 8000:8000 -v oas-data:/data \
-  -e OAS_TRANSPORT=http \
-  -e OAS_DATA_DIR=/data/artifacts \
-  -e KEYCLOAK_ISSUER_URL=https://your-keycloak.railway.app/realms/oas \
-  oas-mcp
-```
+See [keycloak_setup.md](keycloak_setup.md) for the full Keycloak setup guide, including Claude Desktop auth options.
 
 ---
 
@@ -1451,16 +1417,6 @@ list_artifacts(session_id="default")
 # Or check just the metadata (no results payload)
 get_artifact_summary(run_id="20260301T143022_a7f3")
 ```
-
----
-
-## Usage capabilities at a glance
-
-The server supports a full analysis loop: define geometry, run aerodynamic/aerostructural analyses, optimize design variables, and inspect convergence trends and resulting wing-state changes. The example report below illustrates the kinds of outputs agents can generate from tool-call results.
-
-![NTX-320 usage overview dashboard](images/usage_overview_top.png)
-
-![NTX-320 optimization convergence view](images/usage_optimization_history.png)
 
 ---
 
