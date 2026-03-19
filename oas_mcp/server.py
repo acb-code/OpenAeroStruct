@@ -2211,28 +2211,30 @@ def main():
     _auto_sid = f"auto-{_uuid.uuid4().hex[:8]}"
     _prov_session_id.set(_auto_sid)
     _prov_record_session(_auto_sid, notes="Auto-created on server startup")
-    try:
-        import sys as _sys
-        from .provenance.viewer_server import start_viewer_server as _start_viewer
-        _prov_port = _start_viewer()
-        if _prov_port:
-            _sep = "─" * 54
-            print(f"\n{_sep}", file=_sys.stderr)
-            print("  OAS Provenance Viewer", file=_sys.stderr)
-            print(_sep, file=_sys.stderr)
-            print(f"  Viewer    http://localhost:{_prov_port}/viewer", file=_sys.stderr)
-            print(f"            Interactive DAG — load any session from the", file=_sys.stderr)
-            print(f"            drop-down or drop an exported JSON file.", file=_sys.stderr)
-            print(f"  Sessions  http://localhost:{_prov_port}/sessions", file=_sys.stderr)
-            print(f"            JSON list of all recorded provenance sessions.", file=_sys.stderr)
-            print(f"  Plot API  http://localhost:{_prov_port}/plot?run_id=<id>&plot_type=<type>", file=_sys.stderr)
-            print(f"            Render a saved analysis run as a PNG image.", file=_sys.stderr)
-            print(_sep + "\n", file=_sys.stderr)
-    except Exception:
-        pass
-    # --- End provenance setup ---
-
-    if args.transport == "http":
+    if args.transport == "stdio":
+        # Legacy daemon thread viewer for local dev (localhost only, no auth)
+        try:
+            import sys as _sys
+            from .provenance.viewer_server import start_viewer_server as _start_viewer
+            _prov_port = _start_viewer()
+            if _prov_port:
+                _sep = "─" * 54
+                print(f"\n{_sep}", file=_sys.stderr)
+                print("  OAS Provenance Viewer", file=_sys.stderr)
+                print(_sep, file=_sys.stderr)
+                print(f"  Viewer    http://localhost:{_prov_port}/viewer", file=_sys.stderr)
+                print(f"            Interactive DAG — load any session from the", file=_sys.stderr)
+                print(f"            drop-down or drop an exported JSON file.", file=_sys.stderr)
+                print(f"  Sessions  http://localhost:{_prov_port}/sessions", file=_sys.stderr)
+                print(f"            JSON list of all recorded provenance sessions.", file=_sys.stderr)
+                print(f"  Plot API  http://localhost:{_prov_port}/plot?run_id=<id>&plot_type=<type>", file=_sys.stderr)
+                print(f"            Render a saved analysis run as a PNG image.", file=_sys.stderr)
+                print(_sep + "\n", file=_sys.stderr)
+        except Exception:
+            pass
+        mcp.run()
+    else:
+        # --- HTTP transport ---
         try:
             import uvicorn
         except ImportError as exc:
@@ -2241,11 +2243,31 @@ def main():
                 "Install it with: pip install 'openaerostruct[http]'"
             ) from exc
 
+        import sys as _sys
+        from .core.viewer_routes import build_viewer_app
+
         _warn_if_unauthenticated(args.host, args.port)
-        app = mcp.streamable_http_app()
+        mcp_asgi = mcp.streamable_http_app()
+        viewer_app = build_viewer_app()
+
+        if viewer_app is not None:
+            # Compose viewer + MCP: viewer handles its known paths,
+            # everything else falls through to the MCP ASGI app.
+            from .core.viewer_routes import make_fallback_app
+            app = make_fallback_app(viewer_app, mcp_asgi)
+            # Print viewer info
+            _sep = "─" * 54
+            print(f"\n{_sep}", file=_sys.stderr)
+            print("  OAS Provenance Viewer (HTTP transport)", file=_sys.stderr)
+            print(_sep, file=_sys.stderr)
+            print(f"  Viewer    http://{args.host}:{args.port}/viewer", file=_sys.stderr)
+            print(f"            Protected by Basic Auth (OAS_VIEWER_USER/PASSWORD)", file=_sys.stderr)
+            print(_sep + "\n", file=_sys.stderr)
+        else:
+            app = mcp_asgi
+
         uvicorn.run(app, host=args.host, port=args.port)
-    else:
-        mcp.run()
+    # --- End provenance setup ---
 
 
 def _warn_if_unauthenticated(host: str, port: int) -> None:

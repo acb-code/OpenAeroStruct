@@ -87,7 +87,7 @@ def cmd_export(session_id: str, db: Path, output: Path | None) -> None:
 def cmd_serve(db: Path, port: int) -> None:
     """Start a local viewer server and keep running until Ctrl-C."""
     from .db import init_db
-    from .viewer_server import _ProvHandler, _VIEWER_HTML
+    from .viewer_server import _ProvHandler, VIEWER_HTML
     from http.server import HTTPServer
 
     init_db(db)

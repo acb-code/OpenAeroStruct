@@ -24,11 +24,11 @@ import numpy as np
 
 from .db import _dumps, get_session_graph, list_sessions
 
-_VIEWER_HTML = Path(__file__).parent / "viewer" / "index.html"
+VIEWER_HTML = Path(__file__).parent / "viewer" / "index.html"
 _DEFAULT_PORT = 7654
 
 # Maps analysis_type to applicable plot types (for /plot_types endpoint)
-_ANALYSIS_PLOT_TYPES: dict[str, list[str]] = {
+ANALYSIS_PLOT_TYPES: dict[str, list[str]] = {
     "aero":         ["lift_distribution", "planform"],
     "aerostruct":   ["lift_distribution", "stress_distribution", "planform"],
     "drag_polar":   ["drag_polar"],
@@ -37,7 +37,7 @@ _ANALYSIS_PLOT_TYPES: dict[str, list[str]] = {
 }
 
 
-def _generate_plot_png(run_id: str, plot_type: str) -> bytes | None:
+def generate_plot_png(run_id: str, plot_type: str) -> bytes | None:
     """Load an artifact by run_id and return a rendered PNG as bytes.
 
     Returns None if the artifact is not found.
@@ -105,7 +105,7 @@ def _generate_plot_png(run_id: str, plot_type: str) -> bytes | None:
     return plot_result.image.data
 
 
-def _get_plot_types_for_run(run_id: str) -> list[str] | None:
+def get_plot_types_for_run(run_id: str) -> list[str] | None:
     """Return applicable plot types for a run, or None if not found."""
     from oas_mcp.core.artifacts import ArtifactStore
 
@@ -114,7 +114,7 @@ def _get_plot_types_for_run(run_id: str) -> list[str] | None:
     if summary is None:
         return None
     analysis_type = summary.get("analysis_type", "aero")
-    return _ANALYSIS_PLOT_TYPES.get(analysis_type, ["lift_distribution", "planform"])
+    return ANALYSIS_PLOT_TYPES.get(analysis_type, ["lift_distribution", "planform"])
 
 
 class _ProvHandler(BaseHTTPRequestHandler):
@@ -127,7 +127,7 @@ class _ProvHandler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
 
         if path in ("/viewer", "/viewer/"):
-            self._serve_file(_VIEWER_HTML, "text/html; charset=utf-8")
+            self._serve_file(VIEWER_HTML, "text/html; charset=utf-8")
         elif path == "/graph":
             session_id = qs.get("session_id", [None])[0]
             if session_id is None:
@@ -151,7 +151,7 @@ class _ProvHandler(BaseHTTPRequestHandler):
                 self._error(400, "Missing run_id or plot_type query parameters")
                 return
             try:
-                png_bytes = _generate_plot_png(run_id, plot_type)
+                png_bytes = generate_plot_png(run_id, plot_type)
                 if png_bytes is None:
                     self._error(404, f"Artifact not found: run_id={run_id!r}")
                 else:
@@ -166,7 +166,7 @@ class _ProvHandler(BaseHTTPRequestHandler):
                 self._error(400, "Missing run_id query parameter")
                 return
             try:
-                types = _get_plot_types_for_run(run_id)
+                types = get_plot_types_for_run(run_id)
                 if types is None:
                     self._error(404, f"Artifact not found: run_id={run_id!r}")
                 else:

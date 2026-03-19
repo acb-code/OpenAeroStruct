@@ -86,6 +86,9 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-oas-mcp}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?Set OIDC_CLIENT_SECRET in .env}
       RESOURCE_SERVER_URL: ${RESOURCE_SERVER_URL:-https://mcp.lakesideai.dev}
+      # Viewer auth — both must be set to enable the provenance viewer on HTTP
+      OAS_VIEWER_USER: ${OAS_VIEWER_USER:-admin}
+      OAS_VIEWER_PASSWORD: ${OAS_VIEWER_PASSWORD:?Set OAS_VIEWER_PASSWORD in .env}
     networks:
       - internal
       - web
