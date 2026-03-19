@@ -71,7 +71,7 @@ from .core.validation import (
     validate_stability,
 )
 from .core.artifacts import ArtifactStore, _make_run_id
-from .core.auth import build_auth_settings, build_token_verifier, get_current_user
+from .core.auth import build_auth_settings, build_token_verifier, get_current_user, _env as _auth_env
 from .provenance.db import init_db as _prov_init_db, record_session as _prov_record_session
 from .provenance.capture import capture_tool, _prov_session_id
 from .provenance import tools as _prov_tools
@@ -2228,13 +2228,11 @@ def _warn_if_unauthenticated(host: str, port: int) -> None:
     """Print a loud warning to stderr when HTTP transport runs without auth."""
     import sys
 
-    import os
+    issuer_url = _auth_env("OIDC_ISSUER_URL", "KEYCLOAK_ISSUER_URL")
 
-    KEYCLOAK_ISSUER_URL = os.environ.get("KEYCLOAK_ISSUER_URL", "")
-
-    if KEYCLOAK_ISSUER_URL:
+    if issuer_url:
         print(
-            f"\n  OAS MCP — HTTP transport  |  auth: Keycloak ({KEYCLOAK_ISSUER_URL})\n",
+            f"\n  OAS MCP — HTTP transport  |  auth: OIDC ({issuer_url})\n",
             file=sys.stderr,
         )
         return
@@ -2254,11 +2252,11 @@ def _warn_if_unauthenticated(host: str, port: int) -> None:
         "║  This is fine for local development.  For any deployment that    ║\n"
         "║  is reachable over a network, set:                               ║\n"
         "║                                                                  ║\n"
-        "║    KEYCLOAK_ISSUER_URL=https://<your-kc>/realms/<realm>          ║\n"
-        "║    KEYCLOAK_CLIENT_ID=oas-mcp                                    ║\n"
-        "║    KEYCLOAK_CLIENT_SECRET=<secret>                               ║\n"
+        "║    OIDC_ISSUER_URL=https://<provider>/...                        ║\n"
+        "║    OIDC_CLIENT_ID=oas-mcp                                        ║\n"
+        "║    OIDC_CLIENT_SECRET=<secret>                                    ║\n"
         "║                                                                  ║\n"
-        "║  See oas_mcp/keycloak_auth_setup.md for the full setup guide.    ║\n"
+        "║  Works with any OIDC provider (Authentik, Keycloak, Auth0, …).  ║\n"
         "╚══════════════════════════════════════════════════════════════════╝\n",
         file=sys.stderr,
     )

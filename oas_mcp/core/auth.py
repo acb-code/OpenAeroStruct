@@ -1,20 +1,23 @@
-"""Keycloak JWT token verifier for OAS MCP Server HTTP transport.
+"""OIDC JWT token verifier for OAS MCP Server HTTP transport.
 
-Validates RS256 JWTs by fetching JWKS from the Keycloak realm's
-``/protocol/openid-connect/certs`` endpoint.
+Validates RS256 JWTs by discovering the JWKS URI from the issuer's
+``/.well-known/openid-configuration`` endpoint.  Works with any
+standards-compliant OIDC provider (Authentik, Keycloak, Auth0, etc.).
 
 Configuration is via environment variables:
 
-    KEYCLOAK_ISSUER_URL    — full realm URL, e.g.
-                             https://keycloak.example.com/realms/oas
-    KEYCLOAK_CLIENT_ID     — OAuth2 client ID (default: "oas-mcp")
-    KEYCLOAK_CLIENT_SECRET — client secret (used for introspection fallback)
+    OIDC_ISSUER_URL        — issuer URL, e.g.
+                             https://auth.example.com/application/o/my-app/
+    OIDC_CLIENT_ID         — OAuth2 client ID (default: "oas-mcp")
+    OIDC_CLIENT_SECRET     — client secret (optional)
     RESOURCE_SERVER_URL    — public URL of this server (default: http://localhost:8000)
+
+Legacy ``KEYCLOAK_*`` env vars are accepted as fallbacks.
 
 Usage in server.py (HTTP mode only)::
 
-    from oas_mcp.core.auth import KeycloakTokenVerifier, build_auth_settings
-    verifier = KeycloakTokenVerifier(issuer_url=..., client_id=...)
+    from oas_mcp.core.auth import OIDCTokenVerifier, build_auth_settings
+    verifier = OIDCTokenVerifier(issuer_url=..., client_id=...)
     mcp = FastMCP("OpenAeroStruct", token_verifier=verifier, auth=build_auth_settings())
 """
 
@@ -22,14 +25,16 @@ from __future__ import annotations
 
 import contextvars
 import getpass
+import json
 import os
 import threading
+import urllib.request
 from typing import Any
 
 from oas_mcp.core.telemetry import logger
 
 # Contextvar that holds the authenticated username for the current async request.
-# Set by KeycloakTokenVerifier.verify_token() on each successful JWT validation.
+# Set by OIDCTokenVerifier.verify_token() on each successful JWT validation.
 _current_user_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_current_user_ctx", default=""
 )
@@ -38,22 +43,39 @@ _current_user_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
 # so that changes made after module import (e.g., in test fixtures) are picked up.
 
 
-class KeycloakTokenVerifier:
-    """Validates RS256 JWTs issued by a Keycloak realm.
+def _env(name: str, legacy_name: str, default: str = "") -> str:
+    """Read *name* from env, falling back to *legacy_name* (Keycloak compat)."""
+    return os.environ.get(name) or os.environ.get(legacy_name, default)
 
-    Fetches the JWKS on first use and caches the signing key.  The
-    ``PyJWT[crypto]`` and ``httpx`` packages must be installed
+
+def _discover_jwks_uri(issuer_url: str) -> str:
+    """Fetch ``jwks_uri`` from the issuer's OIDC discovery document."""
+    discovery_url = f"{issuer_url.rstrip('/')}/.well-known/openid-configuration"
+    with urllib.request.urlopen(discovery_url, timeout=10) as resp:
+        doc = json.loads(resp.read())
+    jwks_uri = doc.get("jwks_uri")
+    if not jwks_uri:
+        raise ValueError(f"No jwks_uri in OIDC discovery document at {discovery_url}")
+    return jwks_uri
+
+
+class OIDCTokenVerifier:
+    """Validates RS256 JWTs from any OIDC-compliant provider.
+
+    Discovers the JWKS URI from the issuer's
+    ``/.well-known/openid-configuration`` on first use and caches the
+    signing key.  The ``PyJWT[crypto]`` package must be installed
     (``pip install 'openaerostruct[http]'``).
 
     Parameters
     ----------
     issuer_url:
-        Full Keycloak realm URL, e.g.
-        ``https://keycloak.example.com/realms/my-realm``.
+        OIDC issuer URL, e.g.
+        ``https://auth.example.com/application/o/my-app/``.
     client_id:
         OAuth2 audience / client ID that tokens must be issued for.
     client_secret:
-        Optional client secret for token-introspection fallback.
+        Optional client secret.
     """
 
     def __init__(
@@ -75,10 +97,11 @@ class KeycloakTokenVerifier:
                     import jwt  # PyJWT
                 except ImportError as exc:
                     raise ImportError(
-                        "PyJWT[crypto] is required for Keycloak auth. "
+                        "PyJWT[crypto] is required for OIDC auth. "
                         "Install it with: pip install 'openaerostruct[http]'"
                     ) from exc
-                jwks_uri = f"{self._issuer_url}/protocol/openid-connect/certs"
+                jwks_uri = _discover_jwks_uri(self._issuer_url)
+                logger.info("OIDC JWKS URI discovered: %s", jwks_uri)
                 self._jwks_client = jwt.PyJWKClient(jwks_uri)
         return self._jwks_client
 
@@ -145,8 +168,8 @@ class KeycloakTokenVerifier:
 def get_current_user() -> str:
     """Return the authenticated username for the current request.
 
-    In HTTP mode with Keycloak, this reads the username stored by
-    ``KeycloakTokenVerifier.verify_token()`` via a contextvar.
+    In HTTP mode with OIDC, this reads the username stored by
+    ``OIDCTokenVerifier.verify_token()`` via a contextvar.
 
     Falls back to the ``OAS_USER`` environment variable, then to the
     OS login name (``getpass.getuser()``).  The stdio transport always
@@ -161,9 +184,10 @@ def get_current_user() -> str:
 def build_auth_settings() -> Any:
     """Return a FastMCP ``AuthSettings`` object configured from env vars.
 
-    Returns ``None`` if ``KEYCLOAK_ISSUER_URL`` is not set (auth disabled).
+    Returns ``None`` if neither ``OIDC_ISSUER_URL`` nor the legacy
+    ``KEYCLOAK_ISSUER_URL`` is set (auth disabled).
     """
-    issuer_url = os.environ.get("KEYCLOAK_ISSUER_URL", "")
+    issuer_url = _env("OIDC_ISSUER_URL", "KEYCLOAK_ISSUER_URL")
     if not issuer_url:
         return None
     try:
@@ -178,13 +202,17 @@ def build_auth_settings() -> Any:
     )
 
 
-def build_token_verifier() -> KeycloakTokenVerifier | None:
-    """Return a :class:`KeycloakTokenVerifier` if ``KEYCLOAK_ISSUER_URL`` is set."""
-    issuer_url = os.environ.get("KEYCLOAK_ISSUER_URL", "")
+def build_token_verifier() -> OIDCTokenVerifier | None:
+    """Return an :class:`OIDCTokenVerifier` if ``OIDC_ISSUER_URL`` (or legacy ``KEYCLOAK_ISSUER_URL``) is set."""
+    issuer_url = _env("OIDC_ISSUER_URL", "KEYCLOAK_ISSUER_URL")
     if not issuer_url:
         return None
-    return KeycloakTokenVerifier(
+    return OIDCTokenVerifier(
         issuer_url=issuer_url,
-        client_id=os.environ.get("KEYCLOAK_CLIENT_ID", "oas-mcp"),
-        client_secret=os.environ.get("KEYCLOAK_CLIENT_SECRET", ""),
+        client_id=_env("OIDC_CLIENT_ID", "KEYCLOAK_CLIENT_ID", "oas-mcp"),
+        client_secret=_env("OIDC_CLIENT_SECRET", "KEYCLOAK_CLIENT_SECRET"),
     )
+
+
+# Backward-compatible alias so existing imports don't break.
+KeycloakTokenVerifier = OIDCTokenVerifier

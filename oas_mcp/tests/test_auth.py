@@ -1,4 +1,4 @@
-"""Unit tests for Keycloak JWT auth — no network calls, no OAS computation."""
+"""Unit tests for OIDC JWT auth — no network calls, no OAS computation."""
 
 from unittest.mock import MagicMock, patch
 
@@ -6,13 +6,13 @@ import pytest
 
 
 class TestVerifyToken:
-    """Tests for KeycloakTokenVerifier.verify_token → AccessToken | None."""
+    """Tests for OIDCTokenVerifier.verify_token → AccessToken | None."""
 
     def _make_verifier(self):
-        from oas_mcp.core.auth import KeycloakTokenVerifier
+        from oas_mcp.core.auth import OIDCTokenVerifier
 
-        return KeycloakTokenVerifier(
-            issuer_url="https://keycloak.example.com/realms/oas",
+        return OIDCTokenVerifier(
+            issuer_url="https://auth.example.com/application/o/oas-mcp",
             client_id="oas-mcp",
         )
 
@@ -172,6 +172,7 @@ class TestBuilderFunctions:
     """Tests for build_auth_settings and build_token_verifier."""
 
     def test_build_auth_settings_returns_none_without_env(self, monkeypatch):
+        monkeypatch.delenv("OIDC_ISSUER_URL", raising=False)
         monkeypatch.delenv("KEYCLOAK_ISSUER_URL", raising=False)
         import oas_mcp.core.auth as auth_mod
 
@@ -179,6 +180,7 @@ class TestBuilderFunctions:
         assert result is None
 
     def test_build_token_verifier_returns_none_without_env(self, monkeypatch):
+        monkeypatch.delenv("OIDC_ISSUER_URL", raising=False)
         monkeypatch.delenv("KEYCLOAK_ISSUER_URL", raising=False)
         import oas_mcp.core.auth as auth_mod
 
@@ -186,13 +188,27 @@ class TestBuilderFunctions:
         assert result is None
 
     def test_build_token_verifier_returns_verifier_with_env(self, monkeypatch):
-        monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://kc.example.com/realms/r")
-        monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "test-client")
+        monkeypatch.setenv("OIDC_ISSUER_URL", "https://auth.example.com/application/o/app")
+        monkeypatch.setenv("OIDC_CLIENT_ID", "test-client")
+        monkeypatch.delenv("KEYCLOAK_ISSUER_URL", raising=False)
         import oas_mcp.core.auth as auth_mod
-        from oas_mcp.core.auth import KeycloakTokenVerifier
+        from oas_mcp.core.auth import OIDCTokenVerifier
 
         result = auth_mod.build_token_verifier()
 
-        assert isinstance(result, KeycloakTokenVerifier)
-        assert result._issuer_url == "https://kc.example.com/realms/r"
+        assert isinstance(result, OIDCTokenVerifier)
+        assert result._issuer_url == "https://auth.example.com/application/o/app"
         assert result._client_id == "test-client"
+
+    def test_build_token_verifier_falls_back_to_legacy_keycloak_env(self, monkeypatch):
+        monkeypatch.delenv("OIDC_ISSUER_URL", raising=False)
+        monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://kc.example.com/realms/r")
+        monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "legacy-client")
+        import oas_mcp.core.auth as auth_mod
+        from oas_mcp.core.auth import OIDCTokenVerifier
+
+        result = auth_mod.build_token_verifier()
+
+        assert isinstance(result, OIDCTokenVerifier)
+        assert result._issuer_url == "https://kc.example.com/realms/r"
+        assert result._client_id == "legacy-client"
