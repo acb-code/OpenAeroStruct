@@ -186,24 +186,61 @@ def build_auth_settings() -> Any:
 
     Returns ``None`` if neither ``OIDC_ISSUER_URL`` nor the legacy
     ``KEYCLOAK_ISSUER_URL`` is set (auth disabled).
+
+    When an upstream OIDC provider is configured, ``issuer_url`` is set to
+    ``RESOURCE_SERVER_URL`` (the MCP server itself) so the SDK serves its own
+    ``/.well-known/oauth-authorization-server`` with ``/register``, ``/authorize``,
+    and ``/token`` endpoints.  DCR is enabled via ``ClientRegistrationOptions``.
     """
-    issuer_url = _env("OIDC_ISSUER_URL", "KEYCLOAK_ISSUER_URL")
-    if not issuer_url:
+    upstream_issuer = _env("OIDC_ISSUER_URL", "KEYCLOAK_ISSUER_URL")
+    if not upstream_issuer:
         return None
     try:
-        from mcp.server.auth.settings import AuthSettings  # type: ignore[import]
+        from mcp.server.auth.settings import (  # type: ignore[import]
+            AuthSettings,
+            ClientRegistrationOptions,
+        )
     except ImportError:
         return None
     resource_server_url = os.environ.get("RESOURCE_SERVER_URL", "http://localhost:8000")
     return AuthSettings(
-        issuer_url=issuer_url,
+        # The MCP server is the authorization server (OAuth proxy) — issuer = ourselves.
+        issuer_url=resource_server_url,
         required_scopes=["mcp:tools"],
         resource_server_url=resource_server_url,
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True,
+            valid_scopes=["mcp:tools", "openid", "profile", "email"],
+            default_scopes=["mcp:tools"],
+        ),
+    )
+
+
+def build_oauth_provider() -> Any:
+    """Return an :class:`OIDCProxyProvider` if an upstream OIDC issuer is configured."""
+    upstream_issuer = _env("OIDC_ISSUER_URL", "KEYCLOAK_ISSUER_URL")
+    if not upstream_issuer:
+        return None
+    try:
+        from oas_mcp.core.oauth_proxy import OIDCProxyProvider
+    except ImportError:
+        return None
+    return OIDCProxyProvider(
+        upstream_issuer_url=upstream_issuer,
+        upstream_client_id=_env("OIDC_CLIENT_ID", "KEYCLOAK_CLIENT_ID", "oas-mcp"),
+        upstream_client_secret=_env("OIDC_CLIENT_SECRET", "KEYCLOAK_CLIENT_SECRET"),
+        server_url=os.environ.get("RESOURCE_SERVER_URL", "http://localhost:8000"),
     )
 
 
 def build_token_verifier() -> OIDCTokenVerifier | None:
-    """Return an :class:`OIDCTokenVerifier` if ``OIDC_ISSUER_URL`` (or legacy ``KEYCLOAK_ISSUER_URL``) is set."""
+    """Return an :class:`OIDCTokenVerifier` if ``OIDC_ISSUER_URL`` (or legacy ``KEYCLOAK_ISSUER_URL``) is set.
+
+    .. note:: When the OAuth proxy is active (``build_oauth_provider`` returns
+       a provider), the proxy handles token verification internally and this
+       function is **not** used.  It remains available for configurations that
+       only need token verification without the full OAuth proxy.
+    """
     issuer_url = _env("OIDC_ISSUER_URL", "KEYCLOAK_ISSUER_URL")
     if not issuer_url:
         return None

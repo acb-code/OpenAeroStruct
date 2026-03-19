@@ -71,7 +71,7 @@ from .core.validation import (
     validate_stability,
 )
 from .core.artifacts import ArtifactStore, _make_run_id
-from .core.auth import build_auth_settings, build_token_verifier, get_current_user, _env as _auth_env
+from .core.auth import build_auth_settings, build_oauth_provider, build_token_verifier, get_current_user, _env as _auth_env
 from .provenance.db import init_db as _prov_init_db, record_session as _prov_record_session
 from .provenance.capture import capture_tool, _prov_session_id
 from .provenance import tools as _prov_tools
@@ -86,10 +86,16 @@ from .core.validators import (
     validate_wing_type,
 )
 
+# Build auth components — prefer OAuth proxy (enables DCR for Claude Code / claude.ai),
+# fall back to plain token verifier for simpler setups.
+_oauth_provider = build_oauth_provider()
+_token_verifier = None if _oauth_provider else build_token_verifier()
+
 mcp = FastMCP(
     "OpenAeroStruct",
     auth=build_auth_settings(),
-    token_verifier=build_token_verifier(),
+    auth_server_provider=_oauth_provider,
+    token_verifier=_token_verifier,
     # Pass host at construction time so FastMCP configures DNS rebinding protection
     # correctly.  When host="0.0.0.0" FastMCP skips the localhost-only allowlist,
     # which is required for ngrok (requests arrive with Host: <ngrok-url>).
@@ -406,6 +412,35 @@ def _is_cp_dv(name: str) -> bool:
     """Return True if *name* refers to a spanwise control-point DV array."""
     # DV names passed by users omit the _cp suffix (e.g. "twist", "thickness")
     return (name + "_cp") in _CP_KEYS or name in _CP_KEYS
+
+
+# ---------------------------------------------------------------------------
+# OAuth callback route — handles redirect from upstream OIDC provider
+# ---------------------------------------------------------------------------
+
+if _oauth_provider is not None:
+    from starlette.requests import Request as _StarletteRequest
+    from starlette.responses import RedirectResponse as _RedirectResponse, PlainTextResponse as _PlainTextResponse
+
+    @mcp.custom_route("/oauth/callback", methods=["GET"])
+    async def _oauth_callback(request: _StarletteRequest):
+        """Handle the redirect from the upstream OIDC provider after user login."""
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")
+        error = request.query_params.get("error")
+
+        if error:
+            desc = request.query_params.get("error_description", error)
+            return _PlainTextResponse(f"Authentication failed: {desc}", status_code=400)
+
+        if not code or not state:
+            return _PlainTextResponse("Missing code or state parameter", status_code=400)
+
+        try:
+            redirect_url = await _oauth_provider.handle_upstream_callback(code, state)
+            return _RedirectResponse(redirect_url)
+        except Exception as exc:
+            return _PlainTextResponse(f"Callback error: {exc}", status_code=500)
 
 
 # ---------------------------------------------------------------------------
