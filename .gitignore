@@ -32,3 +32,6 @@ oas_data/**
 !oas_data/.keep
 *.env
 *.env.local
+
+# Claude Code — user-specific settings (permissions, paths)
+.claude/settings.local.json

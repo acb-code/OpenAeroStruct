@@ -34,6 +34,7 @@ Homepage = "https://github.com/mdolab/OpenAeroStruct"
 plot_wing    = "openaerostruct.utils.plot_wing:disp_plot"
 plot_wingbox = "openaerostruct.utils.plot_wingbox:disp_plot"
 oas-mcp      = "oas_mcp.server:main"
+oas-cli      = "oas_mcp.cli:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "openaerostruct.__version__" }

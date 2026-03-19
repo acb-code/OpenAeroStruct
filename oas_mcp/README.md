@@ -6,6 +6,13 @@ An [MCP](https://modelcontextprotocol.io) server that wraps [OpenAeroStruct](htt
 
 - [Overview](#overview)
 - [Installation](#installation)
+- [CLI (`oas-cli`)](#cli-oas-cli)
+  - [Installation](#cli-installation)
+  - [Gotchas](#cli-gotchas)
+  - [Three modes](#three-modes)
+  - [Interactive mode](#interactive-mode)
+  - [One-shot mode](#one-shot-mode)
+  - [Script mode](#script--batch-mode)
 - [Running the server](#running-the-server)
   - [stdio (Claude Desktop)](#stdio-transport-default--for-claude-desktop-and-most-mcp-clients)
   - [HTTP transport](#http-transport)
@@ -133,6 +140,162 @@ oas-mcp --help
 
 ```
 usage: oas-mcp [-h] [--transport {stdio,http}] [--host HOST] [--port PORT]
+```
+
+---
+
+## CLI (`oas-cli`)
+
+`oas-cli` is a standalone command-line interface to all 23 OAS tools. It does
+**not** require an MCP connection — it imports the tool functions directly and
+runs them in-process. This makes it the easiest way to use OpenAeroStruct from
+Claude Code, shell scripts, CI pipelines, or any terminal-based agent.
+
+### CLI installation
+
+`oas-cli` is registered as a console script in `pyproject.toml`. It becomes
+available on `PATH` after a pip/uv install of the package:
+
+```bash
+# Editable install (recommended during development)
+pip install -e ".[mcp]"
+# or: uv pip install -e ".[mcp]"
+
+# Verify it's available
+oas-cli list-tools
+```
+
+If `oas-cli: command not found`, the package has not been installed into the
+active environment, or the virtualenv is not activated. **The entry point is
+only created by pip/uv install** — running `python oas_mcp/cli.py` directly
+will not work because the package needs to be importable. Fix with:
+
+```bash
+# If you have a venv but forgot to install:
+source .venv/bin/activate
+pip install -e ".[mcp]"
+
+# If you don't have a venv yet:
+uv venv && source .venv/bin/activate && uv pip install -e ".[mcp]"
+```
+
+You can also invoke the CLI without the entry point via:
+
+```bash
+python -m oas_mcp.cli list-tools
+```
+
+### CLI gotchas
+
+**Global flags must come _before_ the subcommand.** `--pretty`, `--workspace`,
+and `--output` are parser-level flags, not subcommand flags:
+
+```bash
+# Correct:
+oas-cli --pretty run-aero-analysis --surfaces '["wing"]' --alpha 5
+
+# Wrong (argparse error):
+oas-cli run-aero-analysis --surfaces '["wing"]' --alpha 5 --pretty
+```
+
+**One-shot mode rebuilds the OpenMDAO problem on every invocation.** Surface
+definitions are persisted to `~/.oas_mcp/state/<workspace>.json`, but the
+compiled problem is not. Each call pays ~0.1 s for problem setup. For
+parameter sweeps or multi-step studies, use interactive or script mode instead.
+
+**Flag names preserve the case of the Python parameter.** Only underscores are
+converted to hyphens; capitalisation is kept. So `Mach_number` becomes
+`--Mach-number`, `CD0` becomes `--CD0`, and `CL0` becomes `--CL0`. Use
+`oas-cli <subcommand> --help` to see exact flag names.
+
+**`num_y` must be odd.** This is an OpenAeroStruct constraint. Passing an even
+value will raise `USER_INPUT_ERROR`.
+
+### Three modes
+
+| Situation | Best mode |
+|-----------|-----------|
+| Multiple related analyses in one session | **Interactive** — in-memory state, fastest |
+| Quick one-off check from the terminal | **One-shot** — one subcommand per tool call |
+| Reproducible workflow to hand off / re-run | **Script** — JSON file, single process |
+
+### Interactive mode
+
+Spawn `oas-cli interactive` as a long-lived subprocess. Write one JSON object
+per line to stdin, read one JSON response per line from stdout. All state lives
+in memory for the process lifetime.
+
+```bash
+printf '{"tool":"create_surface","args":{"name":"wing","wing_type":"CRM","num_y":7,"symmetry":true,"with_viscous":true,"CD0":0.015}}\n{"tool":"run_aero_analysis","args":{"surfaces":["wing"],"alpha":5.0,"velocity":248.136,"Mach_number":0.84,"density":0.38}}\n' \
+  | oas-cli interactive
+```
+
+From Python (e.g. inside a coding agent):
+
+```python
+import subprocess, json
+
+proc = subprocess.Popen(
+    ["oas-cli", "interactive"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    text=True, bufsize=1,
+)
+
+def call(tool, **args):
+    proc.stdin.write(json.dumps({"tool": tool, "args": args}) + "\n")
+    proc.stdin.flush()
+    return json.loads(proc.stdout.readline())
+
+call("create_surface", name="wing", wing_type="CRM", num_y=7)
+result = call("run_aero_analysis", surfaces=["wing"], alpha=5.0,
+              velocity=248.136, Mach_number=0.84, density=0.38)
+print(result["result"]["results"]["CL"])
+
+proc.stdin.close()
+proc.wait()
+```
+
+### One-shot mode
+
+Each invocation is a standalone process. Surface definitions are automatically
+persisted to `~/.oas_mcp/state/<workspace>.json` so multi-step workflows work
+across separate calls.
+
+```bash
+oas-cli create-surface --name wing --wing-type CRM --num-y 7 \
+        --symmetry --with-viscous --CD0 0.015
+
+oas-cli run-aero-analysis --surfaces '["wing"]' --alpha 5.0 \
+        --velocity 248.136 --Mach-number 0.84 --density 0.38
+
+# Use --workspace to isolate parallel workflows
+oas-cli create-surface --name wing --num-y 7 --workspace study-b
+oas-cli --pretty run-aero-analysis --surfaces '["wing"]' --alpha 3 --workspace study-b
+
+# Clear state
+oas-cli reset
+```
+
+Tool names use hyphens on the CLI: `run_aero_analysis` becomes `run-aero-analysis`.
+List/dict parameters are passed as JSON strings: `--surfaces '["wing"]'`.
+Bool parameters use `--flag` / `--no-flag`: `--with-viscous` / `--no-with-viscous`.
+
+### Script / batch mode
+
+Write a JSON array of tool calls, execute in one process with shared in-memory
+state:
+
+```bash
+oas-cli run-script workflow.json
+oas-cli --pretty --output results.json run-script workflow.json
+```
+
+```json
+[
+  {"tool": "create_surface", "args": {"name": "wing", "wing_type": "CRM",
+                                       "num_y": 7, "symmetry": true}},
+  {"tool": "run_aero_analysis", "args": {"surfaces": ["wing"], "alpha": 5.0}}
+]
 ```
 
 ---
