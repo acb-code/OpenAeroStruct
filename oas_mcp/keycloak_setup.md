@@ -21,7 +21,7 @@ KC_HOSTNAME=auth.lakesideai.dev
 # OAS MCP auth
 OIDC_ISSUER_URL=https://auth.lakesideai.dev/realms/oas
 OIDC_CLIENT_ID=oas-mcp
-OIDC_CLIENT_SECRET=          # fill after step 4 below
+OIDC_CLIENT_SECRET=          # fill after step 4b below
 RESOURCE_SERVER_URL=https://mcp.lakesideai.dev
 ```
 
@@ -43,11 +43,13 @@ Then `sudo systemctl reload caddy`.
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-Wait for Keycloak to become healthy (~30s on first start):
+Wait for Keycloak to become healthy (~30–45s on first start):
 
 ```bash
 docker compose -f docker-compose.prod.yml logs keycloak -f
 ```
+
+Look for: `Keycloak 26.x.x on JVM ... started in XXs. Listening on: http://0.0.0.0:8080`
 
 ## 4. Configure Keycloak
 
@@ -84,20 +86,33 @@ Set **Web origins** to `+`.
 
 ### 4d. Create scope
 
-1. **Client scopes → Create client scope**
+1. **Client scopes** (left sidebar) → **Create client scope**
 2. Name: `mcp:tools`
 3. Type: **Default**
 4. Protocol: **OpenID Connect**
-5. Click **Save**
+5. **Include in token scope**: **ON** (critical — without this the scope won't
+   appear in the access token's `scope` claim, and the MCP server will reject
+   the token)
+6. Click **Save**
 
-Then assign it:
-1. Go back to **Clients → oas-mcp → Client scopes**
+Then assign it to the `oas-mcp` client:
+1. Go to **Clients → oas-mcp → Client scopes** tab
 2. Click **Add client scope** → select `mcp:tools` → Add as **Default**
 
-### 4e. Enable Dynamic Client Registration (DCR)
+### 4e. Remove Trusted Hosts DCR policy
 
-1. **Realm settings → Client registration → Client registration policies**
-2. Under **Anonymous access policies**, verify it exists (Keycloak enables anonymous DCR by default for the realm)
+Keycloak's default "Trusted Hosts" policy blocks DCR requests from
+Claude Code and claude.ai because their requests don't originate from
+a whitelisted host.
+
+1. **Clients** (left sidebar) → **Client registration** tab (top of the page)
+2. Under **Anonymous access policies**, find **Trusted Hosts**
+3. **Delete it** (click the trash icon)
+
+> Keycloak enables anonymous DCR by default for new realms. Removing this
+> policy allows any client to register. This is safe because the MCP server
+> validates every token independently — DCR registration alone grants no
+> access.
 
 Verify DCR works:
 
@@ -119,7 +134,7 @@ Should return: `https://auth.lakesideai.dev/realms/oas/clients-registrations/ope
 By default, Keycloak doesn't include the `oas-mcp` client ID in the token's
 `aud` claim. Without this, JWT audience validation fails.
 
-1. **Client scopes → mcp:tools → Mappers → Configure a new mapper**
+1. **Client scopes** (left sidebar) → **mcp:tools** → **Mappers** tab → **Configure a new mapper**
 2. Choose **Audience**
 3. Name: `oas-mcp-audience`
 4. Included Client Audience: `oas-mcp`
@@ -141,10 +156,11 @@ OAS MCP — HTTP transport  |  auth: OIDC (https://auth.lakesideai.dev/realms/oa
 ## 6. Verify
 
 ```bash
-# OIDC discovery
-curl -s https://auth.lakesideai.dev/realms/oas/.well-known/openid-configuration | jq '{issuer, registration_endpoint, authorization_endpoint, token_endpoint}'
+# OIDC discovery (check issuer, DCR endpoint, token endpoint)
+curl -s https://auth.lakesideai.dev/realms/oas/.well-known/openid-configuration \
+  | jq '{issuer, registration_endpoint, authorization_endpoint, token_endpoint}'
 
-# Protected resource metadata
+# Protected resource metadata (served by the MCP server)
 curl -s https://mcp.lakesideai.dev/.well-known/oauth-protected-resource | jq .
 
 # Unauthenticated request → 401
@@ -160,6 +176,7 @@ claude mcp add --transport http oas-mcp https://mcp.lakesideai.dev/mcp
 ```
 
 Start a session — Claude Code will open your browser for Keycloak login.
+After authenticating, the MCP server's tools will be available.
 
 ### claude.ai
 
@@ -167,3 +184,13 @@ Add as a remote MCP server in claude.ai settings:
 - URL: `https://mcp.lakesideai.dev/mcp`
 - claude.ai will discover the auth server via `/.well-known/oauth-protected-resource`,
   register via DCR, and present the Keycloak login page.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `Token rejected: missing required scope 'mcp:tools'` | Scope not in token | Check **Include in token scope** is ON in the `mcp:tools` client scope settings (step 4d) |
+| `Policy 'Trusted Hosts' rejected request` | DCR blocked | Delete the Trusted Hosts policy (step 4e) |
+| JWT audience validation fails | Missing audience mapper | Add the audience mapper to the `mcp:tools` scope (step 4g) |
+| `password authentication failed` on Keycloak start | Stale Postgres volume | `docker volume rm <project>_postgres_data` and restart |
+| Keycloak health check fails | Port 9000 not exposed | Compose uses port 8080 check; verify `--health-enabled=true` in command |
