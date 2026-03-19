@@ -185,6 +185,26 @@ Add as a remote MCP server in claude.ai settings:
 - claude.ai will discover the auth server via `/.well-known/oauth-protected-resource`,
   register via DCR, and present the Keycloak login page.
 
+### OpenAI Codex (CLI)
+
+```bash
+codex mcp add oas-mcp --url https://mcp.lakesideai.dev/mcp
+codex mcp login oas-mcp --scopes mcp:tools
+```
+
+Your browser will open for Keycloak login. After authenticating, start a
+Codex session and the OAS tools will be available.
+
+Alternatively, add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.oas-mcp]
+url = "https://mcp.lakesideai.dev/mcp"
+scopes = ["mcp:tools"]
+```
+
+Then run `codex mcp login oas-mcp` to authenticate.
+
 ## 8. Adding new users
 
 ### Admin steps
@@ -223,6 +243,20 @@ Add as a remote MCP server in claude.ai settings:
 > 2. Enter URL: `https://mcp.lakesideai.dev/mcp`
 > 3. You'll be redirected to sign in with your credentials above.
 > 4. The OAS tools will appear in your Claude conversation.
+>
+> **Option 3: OpenAI Codex (CLI)**
+>
+> 1. Install Codex if you haven't: `npm install -g @openai/codex`
+> 2. Add the MCP server:
+>    ```bash
+>    codex mcp add oas-mcp --url https://mcp.lakesideai.dev/mcp
+>    ```
+> 3. Log in:
+>    ```bash
+>    codex mcp login oas-mcp --scopes mcp:tools
+>    ```
+> 4. Your browser will open for login. Sign in with your credentials above.
+> 5. Start a Codex session — the OAS tools will be available automatically.
 
 ## Troubleshooting
 
