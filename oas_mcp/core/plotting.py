@@ -104,6 +104,7 @@ PLOT_TYPES = frozenset({
     "opt_dv_evolution",
     "opt_comparison",
     "n2",
+    "wing_viewer",
 })
 
 _FIG_WIDTH_IN = 6.0   # inches
@@ -194,6 +195,7 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "", *, s
     sectional = results.get("sectional_data", {})
     Cl = sectional.get("Cl")
     y = sectional.get("y_span_norm")
+    chords = sectional.get("chords")
 
     # sectional_data is stored keyed by surface name: {"wing": {"Cl": [...], ...}}.
     # Fall through the nested dict to find the first surface with both arrays.
@@ -202,6 +204,8 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "", *, s
             if isinstance(surf_data, dict):
                 Cl = surf_data.get("Cl")
                 y = surf_data.get("y_span_norm")
+                if chords is None:
+                    chords = surf_data.get("chords")
                 if Cl and y:
                     break
 
@@ -211,14 +215,40 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "", *, s
             y_plot = [(y[i] + y[i + 1]) / 2.0 for i in range(len(Cl))]
         else:
             y_plot = y
-        ax.plot(y_plot, Cl, "b-o", markersize=3, linewidth=1.5)
-        ax.set_xlabel("Normalised spanwise station η = 2y/b  [—]   (0 = root, 1 = tip)")
-        ax.set_ylabel("Sectional lift coefficient  Cl  [—]")
-        ax.set_xlim(0, 1)
-        cl_min, cl_max = min(Cl), max(Cl)
-        ax.set_title(
-            f"Cl ∈ [{cl_min:.3f}, {cl_max:.3f}]", fontsize=8
-        )
+
+        if chords is not None and len(chords) >= len(Cl) + 1:
+            # Compute lift loading: Cl·c (proportional to circulation)
+            chord_panel = [(chords[i] + chords[i + 1]) / 2.0 for i in range(len(Cl))]
+            loading = [cl * c for cl, c in zip(Cl, chord_panel)]
+
+            # Elliptical overlay: loading_ell = (4·area / π) · sqrt(1 - η²)
+            y_arr = np.array(y_plot)
+            loading_arr = np.array(loading)
+            _trapz = getattr(np, "trapezoid", None) or np.trapz
+            area = float(_trapz(loading_arr, y_arr))
+            eta = np.array(y_plot)
+            loading_ell = (4.0 * area / np.pi) * np.sqrt(np.maximum(1.0 - eta**2, 0.0))
+
+            ax.plot(y_plot, loading, "b-o", markersize=3, linewidth=1.5, label="Actual loading")
+            ax.plot(y_plot, loading_ell.tolist(), "g--", linewidth=1.5, label="Elliptical (ideal)")
+            ax.legend(fontsize=7)
+            ax.set_xlabel("Normalised spanwise station η = 2y/b  [—]   (0 = root, 1 = tip)")
+            ax.set_ylabel("Lift loading  Cl·c  [m]")
+            ax.set_xlim(0, 1)
+            ld_min, ld_max = min(loading), max(loading)
+            ax.set_title(
+                f"Cl·c ∈ [{ld_min:.4f}, {ld_max:.4f}]", fontsize=8
+            )
+        else:
+            # Fallback: Cl-only plot (backward compat with old artifacts)
+            ax.plot(y_plot, Cl, "b-o", markersize=3, linewidth=1.5)
+            ax.set_xlabel("Normalised spanwise station η = 2y/b  [—]   (0 = root, 1 = tip)")
+            ax.set_ylabel("Sectional lift coefficient  Cl  [—]")
+            ax.set_xlim(0, 1)
+            cl_min, cl_max = min(Cl), max(Cl)
+            ax.set_title(
+                f"Cl ∈ [{cl_min:.3f}, {cl_max:.3f}]", fontsize=8
+            )
     else:
         # Fallback: per-surface bar chart
         surfaces = results.get("surfaces", {})
@@ -328,12 +358,19 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "", *,
         y_nodes = sectional.get("y_span_norm")
         vm = sectional.get("vonmises_MPa")
         fi = sectional.get("failure_index")
+        yield_stress_pa = sectional.get("yield_stress_Pa")
 
         if y_nodes and vm:
             y_vm = _elem_y(y_nodes, len(vm))
             if y_vm is not None:
                 ax1.plot(y_vm, vm, label=surf_name, linewidth=1.5)
                 plotted = True
+                # Yield stress reference line
+                if yield_stress_pa is not None:
+                    ax1.axhline(
+                        yield_stress_pa / 1e6, color="red", linewidth=1.0,
+                        linestyle="--", label="Yield stress",
+                    )
             else:
                 max_vm = surf_res.get("max_vonmises_Pa")
                 if max_vm is not None:
@@ -727,6 +764,177 @@ def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str 
 
 
 # ---------------------------------------------------------------------------
+# Plot: wing_viewer (classic multi-panel view)
+# ---------------------------------------------------------------------------
+
+
+def plot_wing_viewer(run_id: str, results: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
+    """Plot a classic multi-panel wing view (3D wireframe + distributions).
+
+    Mimics the layout of ``plot_wing.py``: 3D mesh on the left, distribution
+    panels on the right. Layout adapts based on available data (aero-only gets
+    2 right panels; aerostruct gets 4).
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers projection
+
+    # Gather data from sectional_data (first surface)
+    sectional_all = results.get("sectional_data", {})
+    if not sectional_all:
+        # Try nested under surfaces
+        for surf_res in results.get("surfaces", {}).values():
+            sectional_all = surf_res.get("sectional_data", {})
+            if sectional_all:
+                break
+
+    sect = {}
+    for surf_data in (sectional_all.values() if sectional_all else []):
+        if isinstance(surf_data, dict) and surf_data.get("mesh"):
+            sect = surf_data
+            break
+    if not sect:
+        # Fall back to first surface with any data
+        for surf_data in (sectional_all.values() if sectional_all else []):
+            if isinstance(surf_data, dict):
+                sect = surf_data
+                break
+
+    mesh_list = sect.get("mesh")
+    has_struct = bool(sect.get("vonmises_MPa"))
+    n_right = 4 if has_struct else 2
+
+    fig = plt.figure(figsize=(10, 6))
+    fig.suptitle(
+        f"{'Wing Viewer — ' + case_name if case_name else 'Wing Viewer'}\n(run_id: {run_id})",
+        fontsize=9, y=0.99,
+    )
+
+    # Left half: 3D wireframe (spans rows 0..3, cols 0..3)
+    ax3d = fig.add_subplot(1, 2, 1, projection="3d")
+
+    if mesh_list is not None:
+        mesh = np.array(mesh_list)
+        # Mirror for symmetric display
+        mesh_right = mesh.copy()
+        mesh_right[:, :, 1] = -mesh_right[:, :, 1]
+
+        for m, c in [(mesh, "steelblue"), (mesh_right, "steelblue")]:
+            ax3d.plot_wireframe(m[:, :, 1], m[:, :, 0], m[:, :, 2],
+                                color=c, linewidth=0.5, alpha=0.6)
+
+        def_mesh_list = sect.get("def_mesh")
+        if def_mesh_list is not None:
+            def_mesh = np.array(def_mesh_list)
+            def_right = def_mesh.copy()
+            def_right[:, :, 1] = -def_right[:, :, 1]
+            for m in [def_mesh, def_right]:
+                ax3d.plot_wireframe(m[:, :, 1], m[:, :, 0], m[:, :, 2],
+                                    color="crimson", linewidth=0.5, alpha=0.4)
+
+        ax3d.set_xlabel("y [m]", fontsize=7)
+        ax3d.set_ylabel("x [m]", fontsize=7)
+        ax3d.set_zlabel("z [m]", fontsize=7)
+        ax3d.tick_params(labelsize=6)
+    else:
+        ax3d.text2D(0.5, 0.5, "No mesh data", transform=ax3d.transAxes,
+                     ha="center", va="center", fontsize=9, color="gray")
+
+    ax3d.set_title("3D Mesh", fontsize=8)
+
+    # Right panels
+    y_norm = sect.get("y_span_norm", [])
+    Cl = sect.get("Cl", [])
+    chords = sect.get("chords", [])
+    twist = sect.get("twist_deg", [])
+    thickness = sect.get("thickness", [])
+    vm = sect.get("vonmises_MPa", [])
+    fi = sect.get("failure_index", [])
+    yield_stress_pa = sect.get("yield_stress_Pa")
+
+    if has_struct:
+        # 4-panel layout on the right
+        ax_twist = fig.add_subplot(4, 2, 2)
+        ax_lift = fig.add_subplot(4, 2, 4)
+        ax_thick = fig.add_subplot(4, 2, 6)
+        ax_stress = fig.add_subplot(4, 2, 8)
+    else:
+        # 2-panel layout
+        ax_twist = fig.add_subplot(2, 2, 2)
+        ax_lift = fig.add_subplot(2, 2, 4)
+        ax_thick = None
+        ax_stress = None
+
+    # Twist panel
+    if twist and y_norm and len(twist) == len(y_norm):
+        ax_twist.plot(y_norm, twist, "b-o", markersize=2, linewidth=1.2)
+    elif twist:
+        ax_twist.plot(range(len(twist)), twist, "b-o", markersize=2, linewidth=1.2)
+        ax_twist.set_xlabel("Station index", fontsize=7)
+    ax_twist.set_ylabel("Twist [deg]", fontsize=7)
+    ax_twist.set_title("Twist Distribution", fontsize=8)
+    ax_twist.grid(True, alpha=0.3)
+    ax_twist.tick_params(labelsize=6)
+
+    # Lift loading panel
+    if Cl and y_norm and len(Cl) == len(y_norm) - 1:
+        y_plot = [(y_norm[i] + y_norm[i + 1]) / 2.0 for i in range(len(Cl))]
+        if chords and len(chords) >= len(Cl) + 1:
+            chord_panel = [(chords[i] + chords[i + 1]) / 2.0 for i in range(len(Cl))]
+            loading = [cl * c for cl, c in zip(Cl, chord_panel)]
+            y_arr = np.array(y_plot)
+            loading_arr = np.array(loading)
+            _trapz = getattr(np, "trapezoid", None) or np.trapz
+            area = float(_trapz(loading_arr, y_arr))
+            eta = np.array(y_plot)
+            loading_ell = (4.0 * area / np.pi) * np.sqrt(np.maximum(1.0 - eta**2, 0.0))
+            ax_lift.plot(y_plot, loading, "b-o", markersize=2, linewidth=1.2, label="Actual")
+            ax_lift.plot(y_plot, loading_ell.tolist(), "g--", linewidth=1.2, label="Elliptical")
+            ax_lift.legend(fontsize=6)
+            ax_lift.set_ylabel("Cl·c [m]", fontsize=7)
+        else:
+            ax_lift.plot(y_plot, Cl, "b-o", markersize=2, linewidth=1.2)
+            ax_lift.set_ylabel("Cl", fontsize=7)
+    ax_lift.set_title("Lift Loading", fontsize=8)
+    ax_lift.grid(True, alpha=0.3)
+    ax_lift.tick_params(labelsize=6)
+
+    # Thickness panel (aerostruct only)
+    if ax_thick is not None:
+        if thickness and y_norm and len(thickness) == len(y_norm) - 1:
+            y_elem = [(y_norm[i] + y_norm[i + 1]) / 2.0 for i in range(len(thickness))]
+            ax_thick.plot(y_elem, thickness, "b-o", markersize=2, linewidth=1.2)
+        elif thickness:
+            ax_thick.plot(range(len(thickness)), thickness, "b-o", markersize=2, linewidth=1.2)
+        ax_thick.set_ylabel("Thickness [m]", fontsize=7)
+        ax_thick.set_title("Tube Thickness", fontsize=8)
+        ax_thick.grid(True, alpha=0.3)
+        ax_thick.tick_params(labelsize=6)
+
+    # Stress panel (aerostruct only)
+    if ax_stress is not None:
+        if vm and y_norm and len(vm) == len(y_norm) - 1:
+            y_elem = [(y_norm[i] + y_norm[i + 1]) / 2.0 for i in range(len(vm))]
+            ax_stress.plot(y_elem, vm, "b-o", markersize=2, linewidth=1.2, label="von Mises")
+            if yield_stress_pa is not None:
+                ax_stress.axhline(
+                    yield_stress_pa / 1e6, color="red", linewidth=1.0,
+                    linestyle="--", label="Yield stress",
+                )
+                ax_stress.legend(fontsize=6)
+        elif vm:
+            ax_stress.plot(range(len(vm)), vm, "b-o", markersize=2, linewidth=1.2)
+        ax_stress.set_ylabel("Stress [MPa]", fontsize=7)
+        ax_stress.set_xlabel("η (0=root, 1=tip)", fontsize=7)
+        ax_stress.set_title("Von Mises Stress", fontsize=8)
+        ax_stress.grid(True, alpha=0.3)
+        ax_stress.tick_params(labelsize=6)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _fig_to_response(fig, run_id, "wing_viewer", save_dir=save_dir)
+
+
+# ---------------------------------------------------------------------------
 # N2 / DSM diagram (HTML saved to disk)
 # ---------------------------------------------------------------------------
 
@@ -890,5 +1098,7 @@ def generate_plot(
         return plot_opt_dv_evolution(run_id, optimization_history or {}, case_name, save_dir=save_dir)
     elif plot_type == "opt_comparison":
         return plot_opt_comparison(run_id, optimization_history or {}, case_name, save_dir=save_dir)
+    elif plot_type == "wing_viewer":
+        return plot_wing_viewer(run_id, results, case_name, save_dir=save_dir)
     else:
         raise ValueError(f"Unhandled plot_type: {plot_type!r}")
