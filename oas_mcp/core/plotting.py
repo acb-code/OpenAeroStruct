@@ -221,25 +221,21 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "", *, s
             chord_panel = [(chords[i] + chords[i + 1]) / 2.0 for i in range(len(Cl))]
             loading = [cl * c for cl, c in zip(Cl, chord_panel)]
 
-            # Sort by ascending η for correct integration and plotting
-            eta = np.array(y_plot)
-            loading_arr = np.array(loading)
-            sort_idx = np.argsort(eta)
-            eta_sorted = eta[sort_idx]
-            loading_sorted = loading_arr[sort_idx]
-
             # Elliptical overlay: loading_ell = (4·area / π) · sqrt(1 - η²)
+            y_arr = np.array(y_plot)
+            loading_arr = np.array(loading)
             _trapz = getattr(np, "trapezoid", None) or np.trapz
-            area = abs(float(_trapz(loading_sorted, eta_sorted)))
-            loading_ell = (4.0 * area / np.pi) * np.sqrt(np.maximum(1.0 - eta_sorted**2, 0.0))
+            area = float(_trapz(loading_arr, y_arr))
+            eta = np.array(y_plot)
+            loading_ell = (4.0 * area / np.pi) * np.sqrt(np.maximum(1.0 - eta**2, 0.0))
 
-            ax.plot(eta_sorted, loading_sorted, "b-o", markersize=3, linewidth=1.5, label="Actual loading")
-            ax.plot(eta_sorted, loading_ell, "g--", linewidth=1.5, label="Elliptical (ideal)")
+            ax.plot(y_plot, loading, "b-o", markersize=3, linewidth=1.5, label="Actual loading")
+            ax.plot(y_plot, loading_ell.tolist(), "g--", linewidth=1.5, label="Elliptical (ideal)")
             ax.legend(fontsize=7)
             ax.set_xlabel("Normalised spanwise station η = 2y/b  [—]   (0 = root, 1 = tip)")
             ax.set_ylabel("Lift loading  Cl·c  [m]")
             ax.set_xlim(0, 1)
-            ld_min, ld_max = float(loading_sorted.min()), float(loading_sorted.max())
+            ld_min, ld_max = min(loading), max(loading)
             ax.set_title(
                 f"Cl·c ∈ [{ld_min:.4f}, {ld_max:.4f}]", fontsize=8
             )
@@ -819,57 +815,42 @@ def plot_wing_viewer(run_id: str, results: dict, case_name: str = "", *, save_di
 
     if mesh_list is not None:
         mesh = np.array(mesh_list)
-        # Mirror for symmetric display (matching plot_wing.py convention)
-        mirror = mesh.copy()
-        mirror[:, :, 1] *= -1.0
-        mirror = mirror[:, ::-1, :][:, 1:, :]
-        full_mesh = np.concatenate([mesh, mirror], axis=1)
+        # Mirror for symmetric display
+        mesh_right = mesh.copy()
+        mesh_right[:, :, 1] = -mesh_right[:, :, 1]
 
-        x, y, z = full_mesh[:, :, 0], full_mesh[:, :, 1], full_mesh[:, :, 2]
-        ax3d.plot_wireframe(x, y, z, rstride=1, cstride=1, color="k", alpha=0.3)
+        for m, c in [(mesh, "steelblue"), (mesh_right, "steelblue")]:
+            ax3d.plot_wireframe(m[:, :, 1], m[:, :, 0], m[:, :, 2],
+                                color=c, linewidth=0.5, alpha=0.6)
 
         def_mesh_list = sect.get("def_mesh")
         if def_mesh_list is not None:
             def_mesh = np.array(def_mesh_list)
-            mirror_d = def_mesh.copy()
-            mirror_d[:, :, 1] *= -1.0
-            mirror_d = mirror_d[:, ::-1, :][:, 1:, :]
-            full_def = np.concatenate([def_mesh, mirror_d], axis=1)
-            ax3d.plot_wireframe(
-                full_def[:, :, 0], full_def[:, :, 1], full_def[:, :, 2],
-                rstride=1, cstride=1, color="k", linewidth=0.8,
-            )
+            def_right = def_mesh.copy()
+            def_right[:, :, 1] = -def_right[:, :, 1]
+            for m in [def_mesh, def_right]:
+                ax3d.plot_wireframe(m[:, :, 1], m[:, :, 0], m[:, :, 2],
+                                    color="crimson", linewidth=0.5, alpha=0.4)
 
-        ax3d.set_axis_off()
+        ax3d.set_xlabel("y [m]", fontsize=7)
+        ax3d.set_ylabel("x [m]", fontsize=7)
+        ax3d.set_zlabel("z [m]", fontsize=7)
+        ax3d.tick_params(labelsize=6)
     else:
         ax3d.text2D(0.5, 0.5, "No mesh data", transform=ax3d.transAxes,
                      ha="center", va="center", fontsize=9, color="gray")
 
     ax3d.set_title("3D Mesh", fontsize=8)
 
-    # Right panels — data from sectional_data
-    y_norm = np.array(sect.get("y_span_norm", []))
-    Cl = np.array(sect.get("Cl", []))
-    chords = np.array(sect.get("chords", []))
-    twist = np.array(sect.get("twist_deg", []))
-    thickness = np.array(sect.get("thickness", []))
-    vm = np.array(sect.get("vonmises_MPa", []))
-    fi = np.array(sect.get("failure_index", []))
+    # Right panels
+    y_norm = sect.get("y_span_norm", [])
+    Cl = sect.get("Cl", [])
+    chords = sect.get("chords", [])
+    twist = sect.get("twist_deg", [])
+    thickness = sect.get("thickness", [])
+    vm = sect.get("vonmises_MPa", [])
+    fi = sect.get("failure_index", [])
     yield_stress_pa = sect.get("yield_stress_Pa")
-
-    # Sort nodal data by ascending η (OAS stores tip→root, we want root→tip)
-    if len(y_norm) > 0:
-        node_sort = np.argsort(y_norm)
-        y_sorted = y_norm[node_sort]
-    else:
-        node_sort = None
-        y_sorted = y_norm
-
-    # Element midpoint η (sorted ascending)
-    if len(y_sorted) > 1:
-        y_elem = (y_sorted[:-1] + y_sorted[1:]) / 2.0
-    else:
-        y_elem = np.array([])
 
     if has_struct:
         # 4-panel layout on the right
@@ -884,10 +865,10 @@ def plot_wing_viewer(run_id: str, results: dict, case_name: str = "", *, save_di
         ax_thick = None
         ax_stress = None
 
-    # Twist panel (nodal values, ny)
-    if len(twist) > 0 and len(twist) == len(y_norm) and node_sort is not None:
-        ax_twist.plot(y_sorted, twist[node_sort], "b-o", markersize=2, linewidth=1.2)
-    elif len(twist) > 0:
+    # Twist panel
+    if twist and y_norm and len(twist) == len(y_norm):
+        ax_twist.plot(y_norm, twist, "b-o", markersize=2, linewidth=1.2)
+    elif twist:
         ax_twist.plot(range(len(twist)), twist, "b-o", markersize=2, linewidth=1.2)
         ax_twist.set_xlabel("Station index", fontsize=7)
     ax_twist.set_ylabel("Twist [deg]", fontsize=7)
@@ -895,64 +876,53 @@ def plot_wing_viewer(run_id: str, results: dict, case_name: str = "", *, save_di
     ax_twist.grid(True, alpha=0.3)
     ax_twist.tick_params(labelsize=6)
 
-    # Lift loading panel (panel values, ny-1)
-    if len(Cl) > 0 and len(y_norm) > 0 and len(Cl) == len(y_norm) - 1:
-        if len(chords) >= len(Cl) + 1:
-            # Sort chords by ascending η, then compute panel midpoints
-            chords_sorted = chords[node_sort]
-            chord_panel = (chords_sorted[:-1] + chords_sorted[1:]) / 2.0
-            # Panel values: reverse if nodes were tip→root (descending η)
-            is_reversed = node_sort[0] > node_sort[-1]
-            Cl_sorted = Cl[::-1] if is_reversed else Cl
-            loading = Cl_sorted * chord_panel
+    # Lift loading panel
+    if Cl and y_norm and len(Cl) == len(y_norm) - 1:
+        y_plot = [(y_norm[i] + y_norm[i + 1]) / 2.0 for i in range(len(Cl))]
+        if chords and len(chords) >= len(Cl) + 1:
+            chord_panel = [(chords[i] + chords[i + 1]) / 2.0 for i in range(len(Cl))]
+            loading = [cl * c for cl, c in zip(Cl, chord_panel)]
+            y_arr = np.array(y_plot)
+            loading_arr = np.array(loading)
             _trapz = getattr(np, "trapezoid", None) or np.trapz
-            area = abs(float(_trapz(loading, y_elem)))
-            loading_ell = (4.0 * area / np.pi) * np.sqrt(np.maximum(1.0 - y_elem**2, 0.0))
-            ax_lift.plot(y_elem, loading, "b-o", markersize=2, linewidth=1.2, label="Actual")
-            ax_lift.plot(y_elem, loading_ell, "g--", linewidth=1.2, label="Elliptical")
+            area = float(_trapz(loading_arr, y_arr))
+            eta = np.array(y_plot)
+            loading_ell = (4.0 * area / np.pi) * np.sqrt(np.maximum(1.0 - eta**2, 0.0))
+            ax_lift.plot(y_plot, loading, "b-o", markersize=2, linewidth=1.2, label="Actual")
+            ax_lift.plot(y_plot, loading_ell.tolist(), "g--", linewidth=1.2, label="Elliptical")
             ax_lift.legend(fontsize=6)
             ax_lift.set_ylabel("Cl·c [m]", fontsize=7)
         else:
-            ax_lift.plot(y_elem if len(y_elem) == len(Cl) else range(len(Cl)),
-                         Cl, "b-o", markersize=2, linewidth=1.2)
+            ax_lift.plot(y_plot, Cl, "b-o", markersize=2, linewidth=1.2)
             ax_lift.set_ylabel("Cl", fontsize=7)
     ax_lift.set_title("Lift Loading", fontsize=8)
     ax_lift.grid(True, alpha=0.3)
     ax_lift.tick_params(labelsize=6)
 
-    # Thickness panel (element values, ny-1) — aerostruct only
+    # Thickness panel (aerostruct only)
     if ax_thick is not None:
-        if len(thickness) > 0 and len(thickness) == len(y_elem):
-            # Reverse if y_norm was tip→root
-            thick_plot = thickness[::-1] if (node_sort is not None and node_sort[0] > node_sort[-1]) else thickness
-            ax_thick.plot(y_elem, thick_plot, "b-o", markersize=2, linewidth=1.2)
-        elif len(thickness) > 0:
+        if thickness and y_norm and len(thickness) == len(y_norm) - 1:
+            y_elem = [(y_norm[i] + y_norm[i + 1]) / 2.0 for i in range(len(thickness))]
+            ax_thick.plot(y_elem, thickness, "b-o", markersize=2, linewidth=1.2)
+        elif thickness:
             ax_thick.plot(range(len(thickness)), thickness, "b-o", markersize=2, linewidth=1.2)
         ax_thick.set_ylabel("Thickness [m]", fontsize=7)
         ax_thick.set_title("Tube Thickness", fontsize=8)
         ax_thick.grid(True, alpha=0.3)
         ax_thick.tick_params(labelsize=6)
 
-    # Stress panel (element values, ny-1) — aerostruct only
+    # Stress panel (aerostruct only)
     if ax_stress is not None:
-        # Filter NaN values from vonmises
-        vm_valid = vm[~np.isnan(vm)] if len(vm) > 0 else vm
-        if len(vm_valid) > 0 and len(vm) == len(y_elem):
-            vm_plot = vm[::-1] if (node_sort is not None and node_sort[0] > node_sort[-1]) else vm
-            # Only plot non-NaN data
-            mask = ~np.isnan(vm_plot)
-            if np.any(mask):
-                ax_stress.plot(y_elem[mask], vm_plot[mask], "b-o", markersize=2, linewidth=1.2, label="von Mises")
+        if vm and y_norm and len(vm) == len(y_norm) - 1:
+            y_elem = [(y_norm[i] + y_norm[i + 1]) / 2.0 for i in range(len(vm))]
+            ax_stress.plot(y_elem, vm, "b-o", markersize=2, linewidth=1.2, label="von Mises")
             if yield_stress_pa is not None:
                 ax_stress.axhline(
                     yield_stress_pa / 1e6, color="red", linewidth=1.0,
                     linestyle="--", label="Yield stress",
                 )
-            ax_stress.set_ylim(bottom=0)
-            if yield_stress_pa is not None:
-                ax_stress.set_ylim(top=yield_stress_pa / 1e6 * 1.1)
-            ax_stress.legend(fontsize=6)
-        elif len(vm) > 0:
+                ax_stress.legend(fontsize=6)
+        elif vm:
             ax_stress.plot(range(len(vm)), vm, "b-o", markersize=2, linewidth=1.2)
         ax_stress.set_ylabel("Stress [MPa]", fontsize=7)
         ax_stress.set_xlabel("η (0=root, 1=tip)", fontsize=7)
