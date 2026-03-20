@@ -72,12 +72,16 @@ def _extract_lift_distribution(results: dict) -> dict:
         if chords is not None and len(chords) >= len(Cl) + 1:
             chord_panel = [(chords[i] + chords[i + 1]) / 2.0 for i in range(len(Cl))]
             loading = [cl * c for cl, c in zip(Cl, chord_panel)]
-            y_arr = np.array(y_plot)
-            loading_arr = np.array(loading)
-            _trapz = getattr(np, "trapezoid", None) or np.trapz
-            area = float(_trapz(loading_arr, y_arr))
             eta = np.array(y_plot)
-            loading_ell = (4.0 * area / np.pi) * np.sqrt(np.maximum(1.0 - eta**2, 0.0))
+            loading_arr = np.array(loading)
+            sort_idx = np.argsort(eta)
+            eta_sorted = eta[sort_idx].tolist()
+            loading_sorted = loading_arr[sort_idx].tolist()
+            _trapz = getattr(np, "trapezoid", None) or np.trapz
+            area = abs(float(_trapz(loading_arr[sort_idx], eta[sort_idx])))
+            loading_ell = ((4.0 * area / np.pi) * np.sqrt(
+                np.maximum(1.0 - np.array(eta_sorted)**2, 0.0)
+            )).tolist()
 
             return {
                 "type": "lift_distribution",
@@ -85,8 +89,8 @@ def _extract_lift_distribution(results: dict) -> dict:
                 "traces": [
                     {
                         "kind": "scatter",
-                        "x": list(y_plot),
-                        "y": loading,
+                        "x": eta_sorted,
+                        "y": loading_sorted,
                         "name": "Actual loading (Cl·c)",
                         "mode": "lines+markers",
                         "line": {"color": "steelblue", "width": 2},
@@ -94,8 +98,8 @@ def _extract_lift_distribution(results: dict) -> dict:
                     },
                     {
                         "kind": "scatter",
-                        "x": list(y_plot),
-                        "y": loading_ell.tolist(),
+                        "x": eta_sorted,
+                        "y": loading_ell,
                         "name": "Elliptical (ideal)",
                         "mode": "lines",
                         "line": {"color": "green", "width": 2, "dash": "dash"},
