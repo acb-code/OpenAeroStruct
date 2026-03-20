@@ -33,7 +33,6 @@ _PNG_FALLBACK_TYPES = frozenset({
     "opt_history",
     "opt_dv_evolution",
     "opt_comparison",
-    "wing_viewer",
 })
 
 
@@ -43,13 +42,10 @@ _PNG_FALLBACK_TYPES = frozenset({
 
 
 def _extract_lift_distribution(results: dict) -> dict:
-    """Extract spanwise lift loading data for a Plotly line chart."""
-    import numpy as np
-
+    """Extract spanwise Cl data for a Plotly bar/line chart."""
     sectional = results.get("sectional_data", {})
     Cl = sectional.get("Cl")
     y = sectional.get("y_span_norm")
-    chords = sectional.get("chords")
 
     # Nested by surface name
     if (Cl is None or y is None) and sectional:
@@ -57,8 +53,6 @@ def _extract_lift_distribution(results: dict) -> dict:
             if isinstance(surf_data, dict):
                 Cl = surf_data.get("Cl")
                 y = surf_data.get("y_span_norm")
-                if chords is None:
-                    chords = surf_data.get("chords")
                 if Cl and y:
                     break
 
@@ -67,46 +61,6 @@ def _extract_lift_distribution(results: dict) -> dict:
             y_plot = [(y[i] + y[i + 1]) / 2.0 for i in range(len(Cl))]
         else:
             y_plot = list(y)
-
-        # When chords available, show lift loading (Cl·c) with elliptical overlay
-        if chords is not None and len(chords) >= len(Cl) + 1:
-            chord_panel = [(chords[i] + chords[i + 1]) / 2.0 for i in range(len(Cl))]
-            loading = [cl * c for cl, c in zip(Cl, chord_panel)]
-            y_arr = np.array(y_plot)
-            loading_arr = np.array(loading)
-            _trapz = getattr(np, "trapezoid", None) or np.trapz
-            area = float(_trapz(loading_arr, y_arr))
-            eta = np.array(y_plot)
-            loading_ell = (4.0 * area / np.pi) * np.sqrt(np.maximum(1.0 - eta**2, 0.0))
-
-            return {
-                "type": "lift_distribution",
-                "interactive": True,
-                "traces": [
-                    {
-                        "kind": "scatter",
-                        "x": list(y_plot),
-                        "y": loading,
-                        "name": "Actual loading (Cl·c)",
-                        "mode": "lines+markers",
-                        "line": {"color": "steelblue", "width": 2},
-                        "marker": {"size": 4},
-                    },
-                    {
-                        "kind": "scatter",
-                        "x": list(y_plot),
-                        "y": loading_ell.tolist(),
-                        "name": "Elliptical (ideal)",
-                        "mode": "lines",
-                        "line": {"color": "green", "width": 2, "dash": "dash"},
-                    },
-                ],
-                "xaxis": {"title": "Normalised spanwise station η = 2y/b  [—]  (0=root, 1=tip)"},
-                "yaxis": {"title": "Lift loading  Cl·c  [m]"},
-                "title": "Lift Distribution",
-            }
-
-        # Fallback: Cl-only bar chart (old artifacts without chords)
         return {
             "type": "lift_distribution",
             "interactive": True,
@@ -217,7 +171,6 @@ def _extract_stress_distribution(results: dict) -> dict:
         y_nodes = sectional.get("y_span_norm")
         vm = sectional.get("vonmises_MPa")
         fi = sectional.get("failure_index")
-        yield_stress_pa = sectional.get("yield_stress_Pa")
 
         if y_nodes and vm:
             y_vm = _elem_y(y_nodes, len(vm))
@@ -229,15 +182,6 @@ def _extract_stress_distribution(results: dict) -> dict:
                     "name": f"{surf_name} von Mises [MPa]",
                     "yaxis": "y1",
                 })
-                # Yield stress reference line
-                if yield_stress_pa is not None:
-                    traces.append({
-                        "kind": "hline",
-                        "y": yield_stress_pa / 1e6,
-                        "name": "Yield stress",
-                        "yaxis": "y1",
-                        "line": {"color": "red", "dash": "dash"},
-                    })
 
         if y_nodes and fi:
             y_fi = _elem_y(y_nodes, len(fi))
@@ -397,7 +341,7 @@ def extract_plot_data(
     if plot_type == "n2":
         return {"type": "n2", "interactive": False, "has_file": True}
 
-    if plot_type in _PNG_FALLBACK_TYPES:  # includes wing_viewer
+    if plot_type in _PNG_FALLBACK_TYPES:
         return {"type": plot_type, "interactive": False}
 
     if plot_type == "lift_distribution":
@@ -595,7 +539,6 @@ DASHBOARD_HTML = """\
       <option value="opt_history">Opt History</option>
       <option value="opt_dv_evolution">DV Evolution</option>
       <option value="opt_comparison">Opt Comparison</option>
-      <option value="wing_viewer">Wing Viewer</option>
       <option value="n2">N2 Diagram</option>
     </select>
     <button id="refresh-btn">↻ Refresh</button>

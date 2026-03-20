@@ -170,20 +170,6 @@ def extract_standard_detail(
             y_norm = (y_abs / span_half).tolist()
             sect["y_span_norm"] = y_norm
 
-            # Chord lengths per spanwise station (ny values)
-            chords = np.abs(mesh[-1, :, 0] - mesh[0, :, 0]).ravel()
-            sect["chords"] = chords.tolist()
-
-            # Full mesh for 3D wireframe (wing_viewer plot)
-            sect["mesh"] = mesh.tolist()  # (nx, ny, 3)
-
-            # Twist distribution
-            for twist_path in [f"{name}.geometry.twist", f"{name}.twist"]:
-                twist_val = _try_get(prob, twist_path)
-                if twist_val is not None:
-                    sect["twist_deg"] = np.asarray(twist_val).ravel().tolist()
-                    break
-
             # Mesh snapshot: leading/trailing edge for planform plot
             le = np.asarray(mesh[0, :, :]).tolist()
             te = np.asarray(mesh[-1, :, :]).tolist()
@@ -236,21 +222,6 @@ def extract_standard_detail(
                     sigma_allow = yield_stress / safety_factor
                     vm_pa = np.array(sect["vonmises_MPa"]) * 1e6
                     sect["failure_index"] = (vm_pa / sigma_allow - 1.0).tolist()
-
-            # Deformed mesh (aerostruct only)
-            def_mesh_val = _try_get(prob, f"{point_name}.coupled.{name}.def_mesh")
-            if def_mesh_val is not None:
-                sect["def_mesh"] = np.asarray(def_mesh_val).tolist()
-
-            # Tube thickness (ny-1 values)
-            thick_val = _try_get(prob, f"{point_name}.{name}.thickness") or _try_get(prob, f"{name}.thickness")
-            if thick_val is not None:
-                sect["thickness"] = np.asarray(thick_val).ravel().tolist()
-
-            # Yield stress from surface definition
-            yield_stress_val = surface.get("yield")
-            if yield_stress_val is not None:
-                sect["yield_stress_Pa"] = float(yield_stress_val)
 
         standard["sectional_data"][name] = sect
 

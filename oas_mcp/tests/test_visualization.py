@@ -21,7 +21,6 @@ from oas_mcp.core.plotting import (
     plot_planform,
     plot_opt_dv_evolution,
     plot_opt_comparison,
-    plot_wing_viewer,
 )
 
 
@@ -60,37 +59,6 @@ class TestLiftDistribution:
         """Cl (n panels) and y (n+1 nodes) → line plot via midpoints."""
         n = 6  # panels
         Cl = [0.5 + 0.1 * i for i in range(n)]
-        y = [i / n for i in range(n + 1)]
-
-        results = {
-            "sectional_data": {
-                "wing": {"Cl": Cl, "y_span_norm": y}
-            },
-            "surfaces": {},
-        }
-        img = plot_lift_distribution(_RUN_ID, results)
-        assert _is_valid_plot(img)
-
-    def test_loading_with_chords(self):
-        """When chords available, plot lift loading (Cl·c) with elliptical overlay."""
-        n = 6
-        Cl = [0.5 + 0.1 * i for i in range(n)]
-        y = [i / n for i in range(n + 1)]
-        chords = [1.5 - 0.1 * i for i in range(n + 1)]  # ny chord values
-
-        results = {
-            "sectional_data": {
-                "wing": {"Cl": Cl, "y_span_norm": y, "chords": chords}
-            },
-            "surfaces": {},
-        }
-        img = plot_lift_distribution(_RUN_ID, results)
-        assert _is_valid_plot(img)
-
-    def test_no_chords_backward_compat(self):
-        """Without chords, falls back to Cl-only plot (backward compat)."""
-        n = 6
-        Cl = [0.5] * n
         y = [i / n for i in range(n + 1)]
 
         results = {
@@ -141,8 +109,7 @@ class TestLiftDistribution:
 class TestStressDistribution:
     """Bug A+B: vonmises per element, failure_index derived from scalar."""
 
-    def _make_struct_results(self, ny: int, include_failure: bool = True,
-                              yield_stress_pa: float | None = None) -> dict:
+    def _make_struct_results(self, ny: int, include_failure: bool = True) -> dict:
         n_elem = ny - 1
         y_nodes = [i / (ny - 1) for i in range(ny)]
         vm = [100.0 + 50.0 * i for i in range(n_elem)]
@@ -153,8 +120,6 @@ class TestStressDistribution:
         if include_failure:
             # failure_index: ny-1 values
             sect["failure_index"] = [v / 200.0 - 1.0 for v in vm]
-        if yield_stress_pa is not None:
-            sect["yield_stress_Pa"] = yield_stress_pa
         surf_results = {
             "sectional_data": sect,
             "max_vonmises_Pa": max(vm) * 1e6,
@@ -172,18 +137,6 @@ class TestStressDistribution:
     def test_failure_index_present(self):
         """failure_index renders on both stress and failure panels."""
         results = self._make_struct_results(ny=5, include_failure=True)
-        img = plot_stress_distribution(_RUN_ID, results)
-        assert _is_valid_plot(img)
-
-    def test_yield_stress_line(self):
-        """Yield stress reference line renders when yield_stress_Pa present."""
-        results = self._make_struct_results(ny=7, yield_stress_pa=500e6)
-        img = plot_stress_distribution(_RUN_ID, results)
-        assert _is_valid_plot(img)
-
-    def test_no_yield_stress(self):
-        """Without yield_stress_Pa, no yield line rendered (no error)."""
-        results = self._make_struct_results(ny=7, yield_stress_pa=None)
         img = plot_stress_distribution(_RUN_ID, results)
         assert _is_valid_plot(img)
 
@@ -323,80 +276,6 @@ class TestOptComparison:
         """No DV data → placeholder text renders."""
         img = plot_opt_comparison(_RUN_ID, {})
         assert _is_valid_plot(img)
-
-
-# ---------------------------------------------------------------------------
-# Unit tests: wing_viewer
-# ---------------------------------------------------------------------------
-
-
-class TestWingViewer:
-    """Classic multi-panel wing view plot."""
-
-    def _make_mesh(self, nx: int = 2, ny: int = 7) -> list:
-        """Build a simple rectangular mesh as nested list."""
-        y = np.linspace(-5, 0, ny)
-        mesh = np.zeros((nx, ny, 3))
-        for i in range(nx):
-            mesh[i, :, 0] = i * 1.0  # chordwise
-            mesh[i, :, 1] = y
-        return mesh.tolist()
-
-    def test_aero_only(self):
-        """Aero-only data → 2-panel layout renders."""
-        ny = 7
-        n_panels = ny - 1
-        mesh = self._make_mesh(nx=2, ny=ny)
-        results = {
-            "sectional_data": {
-                "wing": {
-                    "mesh": mesh,
-                    "y_span_norm": [i / (ny - 1) for i in range(ny)],
-                    "Cl": [0.4 + 0.05 * i for i in range(n_panels)],
-                    "chords": [1.0] * ny,
-                    "twist_deg": [3.0 - 0.5 * i for i in range(ny)],
-                }
-            },
-        }
-        img = plot_wing_viewer(_RUN_ID, results)
-        assert _is_valid_plot(img)
-
-    def test_aerostruct(self):
-        """Aerostruct data → 4-panel layout renders."""
-        ny = 7
-        n_panels = ny - 1
-        n_elem = ny - 1
-        mesh = self._make_mesh(nx=2, ny=ny)
-        def_mesh = np.array(mesh)
-        def_mesh[:, :, 2] += 0.1  # slight deflection
-        results = {
-            "sectional_data": {
-                "wing": {
-                    "mesh": mesh,
-                    "def_mesh": def_mesh.tolist(),
-                    "y_span_norm": [i / (ny - 1) for i in range(ny)],
-                    "Cl": [0.4 + 0.05 * i for i in range(n_panels)],
-                    "chords": [1.0] * ny,
-                    "twist_deg": [3.0 - 0.5 * i for i in range(ny)],
-                    "thickness": [0.05 - 0.005 * i for i in range(n_elem)],
-                    "vonmises_MPa": [100.0 + 30.0 * i for i in range(n_elem)],
-                    "failure_index": [-0.5 + 0.1 * i for i in range(n_elem)],
-                    "yield_stress_Pa": 500e6,
-                }
-            },
-        }
-        img = plot_wing_viewer(_RUN_ID, results)
-        assert _is_valid_plot(img)
-
-    def test_no_data_fallback(self):
-        """Empty results → renders without error."""
-        results = {"sectional_data": {}}
-        img = plot_wing_viewer(_RUN_ID, results)
-        assert _is_valid_plot(img)
-
-    def test_wing_viewer_in_plot_types(self):
-        """wing_viewer is registered in PLOT_TYPES."""
-        assert "wing_viewer" in PLOT_TYPES
 
 
 # ---------------------------------------------------------------------------
