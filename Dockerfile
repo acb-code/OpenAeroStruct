@@ -14,12 +14,15 @@ COPY . .
 # Install the package with MCP + HTTP transport dependencies (uvicorn, PyJWT, httpx)
 RUN pip install --no-cache-dir ".[http]"
 
-# Create non-root user for runtime
-RUN useradd -r -s /usr/sbin/nologin oas && \
+# Create non-root user for runtime with a writable home directory
+RUN useradd -r -m -s /usr/sbin/nologin oas && \
     mkdir -p /data && chown oas:oas /data
 
 # Artifact storage root inside the container (bind-mounted from host ./oas_data)
 ENV OAS_DATA_DIR=/data
+
+# Matplotlib cache dir — avoids "Permission denied: /home/oas" warnings
+ENV MPLCONFIGDIR=/tmp/matplotlib
 
 # Default transport — override with OAS_TRANSPORT=http for streamable HTTP
 ENV OAS_TRANSPORT=stdio
