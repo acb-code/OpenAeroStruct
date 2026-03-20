@@ -5,6 +5,7 @@ The server generates publication-quality 900×540 px plots from any completed ru
 ## Contents
 
 - [Quick start](#quick-start)
+- [Output modes](#output-modes)
 - [Available plot types](#available-plot-types)
 - [Step-by-step workflow](#step-by-step-workflow)
 - [Auto-visualization](#auto-visualization)
@@ -12,6 +13,7 @@ The server generates publication-quality 900×540 px plots from any completed ru
 - [Response format](#response-format)
 - [Client-side image caching](#client-side-image-caching)
 - [Checking available plots before calling](#checking-available-plots-before-calling)
+- [Dashboard](#dashboard)
 
 ---
 
@@ -30,6 +32,56 @@ import base64
 png_bytes = base64.b64decode(plot["image_base64"])
 with open("lift_distribution.png", "wb") as f:
     f.write(png_bytes)
+```
+
+---
+
+## Output modes
+
+`visualize()` supports three output modes, controlled per-call or per-session. This is particularly useful in CLI environments (Claude Code, Codex) where MCP `ImageContent` renders as unhelpful `[image]` text.
+
+### Per-session (set once, applies to all calls)
+
+```python
+configure_session(visualization_output="file")   # or "url" or "inline"
+```
+
+### Per-call (overrides session default)
+
+```python
+visualize(run_id=run_id, plot_type="lift_distribution", output="url")
+```
+
+### Mode reference
+
+| Mode | `visualize()` returns | Best for |
+|------|----------------------|----------|
+| `"inline"` (default) | `[metadata, ImageContent]` | claude.ai — image renders natively |
+| `"file"` | `[metadata]` with `file_path` | Claude Code (local) — PNG saved to disk, no `[image]` noise |
+| `"url"` | `[metadata]` with `dashboard_url` + `plot_url` | Claude Code (VPS) — clickable links open in browser |
+
+### File mode
+
+PNGs are saved to `{OAS_DATA_DIR}/{user}/{project}/{session_id}/plots/{run_id}_{plot_type}.png`. The `file_path` key in the metadata points to the absolute path.
+
+```python
+configure_session(visualization_output="file")
+result = visualize(run_id=run_id, plot_type="lift_distribution")
+# result[0]["file_path"] → "/path/to/oas_data/.../plots/run123_lift_distribution.png"
+```
+
+### URL mode
+
+Returns `dashboard_url` (a context-rich HTML page) and `plot_url` (direct PNG) using the server's public URL.
+
+- **Local (stdio transport):** URLs point to `http://localhost:{OAS_PROV_PORT}` (default 7654)
+- **VPS (HTTP transport):** URLs use `RESOURCE_SERVER_URL` (e.g. `https://mcp.lakesideai.dev`)
+
+```python
+configure_session(visualization_output="url")
+result = visualize(run_id=run_id, plot_type="lift_distribution")
+# result[0]["dashboard_url"] → "https://mcp.lakesideai.dev/dashboard?run_id=..."
+# result[0]["plot_url"]      → "https://mcp.lakesideai.dev/plot?run_id=...&plot_type=lift_distribution"
 ```
 
 ---
@@ -374,3 +426,25 @@ for plot_type in available:
 | `drag_polar` | `drag_polar`, `planform` |
 | `stability` | `planform` |
 | Any with convergence data | `convergence` |
+
+---
+
+## Dashboard
+
+The `/dashboard?run_id=<id>` HTTP endpoint provides a context-rich HTML page for any saved run. It includes:
+
+- **Header** — analysis type, surface names, run_name label, run_id, timestamp
+- **Flight conditions** — velocity, Mach, density, Re, alpha
+- **Key results** — CL, CD, L/D, weight, failure index
+- **Validation status** — pass/fail badge with findings details
+- **Plots panel** — all applicable plot types rendered as PNG images
+- **Provenance link** — link to `/viewer?session_id=X` if session is active
+
+### Access
+
+| Transport | URL | Auth |
+|-----------|-----|------|
+| stdio (local) | `http://localhost:7654/dashboard?run_id=X` | None |
+| HTTP (VPS) | `https://<host>/dashboard?run_id=X` | Basic Auth (`OAS_VIEWER_USER`/`OAS_VIEWER_PASSWORD`) |
+
+The dashboard URL is included in `visualize()` metadata when `output="url"` is used.

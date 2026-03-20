@@ -116,12 +116,18 @@ _DPI = 150            # → 900 × 540 px
 # ---------------------------------------------------------------------------
 
 
-def _fig_to_response(fig, run_id: str, plot_type: str) -> PlotResult:
+def _fig_to_response(
+    fig, run_id: str, plot_type: str, save_dir: str | Path | None = None,
+) -> PlotResult:
     """Convert a matplotlib Figure to a PlotResult (Image + metadata dict).
 
     Pixel dimensions are captured before closing the figure so they reflect
     the actual rendered size (bbox_inches="tight" can adjust the canvas).
     The SHA-256 hash in the metadata is used for client-side caching.
+
+    If *save_dir* is given, the PNG is also persisted to
+    ``{save_dir}/plots/{run_id}_{plot_type}.png`` and ``file_path`` is added
+    to the metadata dict.
     """
     _, plt = _require_mpl()
     # Capture dimensions *before* savefig/close — tight bbox may change them
@@ -146,6 +152,15 @@ def _fig_to_response(fig, run_id: str, plot_type: str) -> PlotResult:
             "If not visible, use get_detailed_results() for the underlying data."
         ),
     }
+
+    # Persist PNG to disk when save_dir is provided
+    if save_dir is not None:
+        plots_dir = Path(save_dir) / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        file_path = plots_dir / f"{run_id}_{plot_type}.png"
+        file_path.write_bytes(png_bytes)
+        metadata["file_path"] = str(file_path.resolve())
+
     return PlotResult(image=img, metadata=metadata)
 
 
@@ -162,7 +177,7 @@ def _make_fig(run_id: str, title: str) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def plot_lift_distribution(run_id: str, results: dict, case_name: str = "") -> PlotResult:
+def plot_lift_distribution(run_id: str, results: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
     """Plot spanwise sectional Cl distribution.
 
     Looks for ``sectional_data.Cl`` (list of floats) and
@@ -216,7 +231,7 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "") -> P
 
     ax.grid(True, alpha=0.3)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
-    return _fig_to_response(fig, run_id, "lift_distribution")
+    return _fig_to_response(fig, run_id, "lift_distribution", save_dir=save_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +239,7 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "") -> P
 # ---------------------------------------------------------------------------
 
 
-def plot_drag_polar(run_id: str, results: dict, case_name: str = "") -> PlotResult:
+def plot_drag_polar(run_id: str, results: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
     """Plot CL vs CD and L/D vs alpha side-by-side."""
     _require_mpl()
     import matplotlib.pyplot as plt
@@ -272,7 +287,7 @@ def plot_drag_polar(run_id: str, results: dict, case_name: str = "") -> PlotResu
     ax2.grid(True, alpha=0.3)
 
     fig.tight_layout(rect=[0, 0, 1, 0.93])
-    return _fig_to_response(fig, run_id, "drag_polar")
+    return _fig_to_response(fig, run_id, "drag_polar", save_dir=save_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +295,7 @@ def plot_drag_polar(run_id: str, results: dict, case_name: str = "") -> PlotResu
 # ---------------------------------------------------------------------------
 
 
-def plot_stress_distribution(run_id: str, results: dict, case_name: str = "") -> PlotResult:
+def plot_stress_distribution(run_id: str, results: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
     """Plot spanwise von Mises stress and failure index distribution.
 
     Looks for per-surface ``sectional_data.vonmises_MPa`` and
@@ -377,7 +392,7 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "") ->
                  ha="center", va="center", fontsize=10, color="gray")
 
     fig.tight_layout(rect=[0, 0, 1, 0.93])
-    return _fig_to_response(fig, run_id, "stress_distribution")
+    return _fig_to_response(fig, run_id, "stress_distribution", save_dir=save_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +400,7 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "") ->
 # ---------------------------------------------------------------------------
 
 
-def plot_convergence(run_id: str, convergence_data: dict, case_name: str = "") -> PlotResult:
+def plot_convergence(run_id: str, convergence_data: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
     """Plot solver residual history.
 
     Parameters
@@ -427,7 +442,7 @@ def plot_convergence(run_id: str, convergence_data: dict, case_name: str = "") -
 
     ax.grid(True, alpha=0.3)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
-    return _fig_to_response(fig, run_id, "convergence")
+    return _fig_to_response(fig, run_id, "convergence", save_dir=save_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -435,7 +450,7 @@ def plot_convergence(run_id: str, convergence_data: dict, case_name: str = "") -
 # ---------------------------------------------------------------------------
 
 
-def plot_planform(run_id: str, mesh_data: dict, case_name: str = "") -> PlotResult:
+def plot_planform(run_id: str, mesh_data: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
     """Plot wing planform (top view) with optional deflection overlay.
 
     Parameters
@@ -496,7 +511,7 @@ def plot_planform(run_id: str, mesh_data: dict, case_name: str = "") -> PlotResu
     ax.legend(fontsize=7, loc="upper left")
     ax.grid(True, alpha=0.3)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
-    return _fig_to_response(fig, run_id, "planform")
+    return _fig_to_response(fig, run_id, "planform", save_dir=save_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +519,7 @@ def plot_planform(run_id: str, mesh_data: dict, case_name: str = "") -> PlotResu
 # ---------------------------------------------------------------------------
 
 
-def plot_opt_history(run_id: str, optimization_history: dict, case_name: str = "") -> PlotResult:
+def plot_opt_history(run_id: str, optimization_history: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
     """Plot optimizer objective convergence history.
 
     Shows the objective value per optimizer iteration.  If only initial and
@@ -558,7 +573,7 @@ def plot_opt_history(run_id: str, optimization_history: dict, case_name: str = "
 
     ax.grid(True, alpha=0.3)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
-    return _fig_to_response(fig, run_id, "opt_history")
+    return _fig_to_response(fig, run_id, "opt_history", save_dir=save_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +581,7 @@ def plot_opt_history(run_id: str, optimization_history: dict, case_name: str = "
 # ---------------------------------------------------------------------------
 
 
-def plot_opt_dv_evolution(run_id: str, optimization_history: dict, case_name: str = "") -> PlotResult:
+def plot_opt_dv_evolution(run_id: str, optimization_history: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
     """Plot design variable evolution over optimizer iterations.
 
     For vector DVs (e.g. twist_cp), plots the mean of the DV vector per
@@ -627,7 +642,7 @@ def plot_opt_dv_evolution(run_id: str, optimization_history: dict, case_name: st
     ax.legend(fontsize=7, loc="best")
     ax.grid(True, alpha=0.3)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
-    return _fig_to_response(fig, run_id, "opt_dv_evolution")
+    return _fig_to_response(fig, run_id, "opt_dv_evolution", save_dir=save_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +650,7 @@ def plot_opt_dv_evolution(run_id: str, optimization_history: dict, case_name: st
 # ---------------------------------------------------------------------------
 
 
-def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str = "") -> PlotResult:
+def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
     """Plot before/after comparison of design variable values.
 
     Generates a grouped bar chart with one group per DV, showing the initial
@@ -708,7 +723,7 @@ def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str 
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3, axis="y")
     fig.tight_layout(rect=[0, 0, 1, 0.93])
-    return _fig_to_response(fig, run_id, "opt_comparison")
+    return _fig_to_response(fig, run_id, "opt_comparison", save_dir=save_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +831,7 @@ def generate_plot(
     mesh_data: dict | None = None,
     case_name: str = "",
     optimization_history: dict | None = None,
+    save_dir: str | Path | None = None,
 ) -> PlotResult:
     """Generate a plot and return a PlotResult (Image + metadata).
 
@@ -836,6 +852,10 @@ def generate_plot(
     optimization_history:
         Optimization history dict — required for opt_history, opt_dv_evolution,
         and opt_comparison plot types.
+    save_dir:
+        If provided, the PNG is also saved to
+        ``{save_dir}/plots/{run_id}_{plot_type}.png`` and ``file_path`` is
+        added to the metadata.
 
     Returns
     -------
@@ -855,20 +875,20 @@ def generate_plot(
         )
 
     if plot_type == "lift_distribution":
-        return plot_lift_distribution(run_id, results, case_name)
+        return plot_lift_distribution(run_id, results, case_name, save_dir=save_dir)
     elif plot_type == "drag_polar":
-        return plot_drag_polar(run_id, results, case_name)
+        return plot_drag_polar(run_id, results, case_name, save_dir=save_dir)
     elif plot_type == "stress_distribution":
-        return plot_stress_distribution(run_id, results, case_name)
+        return plot_stress_distribution(run_id, results, case_name, save_dir=save_dir)
     elif plot_type == "convergence":
-        return plot_convergence(run_id, convergence_data or {}, case_name)
+        return plot_convergence(run_id, convergence_data or {}, case_name, save_dir=save_dir)
     elif plot_type == "planform":
-        return plot_planform(run_id, mesh_data or {}, case_name)
+        return plot_planform(run_id, mesh_data or {}, case_name, save_dir=save_dir)
     elif plot_type == "opt_history":
-        return plot_opt_history(run_id, optimization_history or {}, case_name)
+        return plot_opt_history(run_id, optimization_history or {}, case_name, save_dir=save_dir)
     elif plot_type == "opt_dv_evolution":
-        return plot_opt_dv_evolution(run_id, optimization_history or {}, case_name)
+        return plot_opt_dv_evolution(run_id, optimization_history or {}, case_name, save_dir=save_dir)
     elif plot_type == "opt_comparison":
-        return plot_opt_comparison(run_id, optimization_history or {}, case_name)
+        return plot_opt_comparison(run_id, optimization_history or {}, case_name, save_dir=save_dir)
     else:
         raise ValueError(f"Unhandled plot_type: {plot_type!r}")

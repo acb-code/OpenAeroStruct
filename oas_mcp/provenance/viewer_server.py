@@ -117,6 +117,172 @@ def get_plot_types_for_run(run_id: str) -> list[str] | None:
     return ANALYSIS_PLOT_TYPES.get(analysis_type, ["lift_distribution", "planform"])
 
 
+def generate_dashboard_html(run_id: str) -> str | None:
+    """Generate a context-rich HTML dashboard for a given run_id.
+
+    Returns None if the artifact is not found.
+    """
+    from oas_mcp.core.artifacts import ArtifactStore
+
+    store = ArtifactStore()
+    artifact = store.get(run_id)
+    if artifact is None:
+        return None
+
+    metadata = artifact.get("metadata", {})
+    results = artifact.get("results", {})
+    validation = artifact.get("validation", {})
+    analysis_type = metadata.get("analysis_type", "aero")
+    run_name = metadata.get("run_name", "")
+    timestamp = metadata.get("timestamp", "")
+    surfaces = metadata.get("surfaces", [])
+    session_id = metadata.get("session_id", "")
+
+    # Flight conditions
+    flight = {}
+    for key in ("velocity", "Mach_number", "density", "re", "alpha"):
+        if key in results:
+            flight[key] = results[key]
+
+    # Key scalar results
+    scalars = {}
+    for key in ("CL", "CD", "L_over_D", "total_weight", "structural_mass"):
+        if key in results:
+            scalars[key] = results[key]
+    # Check surfaces for failure
+    for surf_name, surf_data in results.get("surfaces", {}).items():
+        if "failure" in surf_data:
+            scalars[f"{surf_name}.failure"] = surf_data["failure"]
+
+    # For optimization runs, pull from final_results too
+    if analysis_type == "optimization":
+        final = results.get("final_results", {})
+        for key in ("CL", "CD", "L_over_D", "total_weight"):
+            if key in final and key not in scalars:
+                scalars[key] = final[key]
+
+    # Determine available plot types
+    plot_types = ANALYSIS_PLOT_TYPES.get(analysis_type, ["lift_distribution", "planform"])
+
+    # Build HTML
+    flight_rows = "".join(
+        f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in flight.items()
+    )
+    scalar_rows = "".join(
+        f"<tr><td>{k}</td><td>{f'{v:.6g}' if isinstance(v, float) else v}</td></tr>"
+        for k, v in scalars.items()
+    )
+    plot_panels = ""
+    for pt in plot_types:
+        pt_title = pt.replace("_", " ").title()
+        onerror = "this.parentElement.innerHTML='<p class=no-data>Not available</p>'"
+        plot_panels += (
+            f'<div class="plot-panel">'
+            f'<h3>{pt_title}</h3>'
+            f'<img src="/plot?run_id={run_id}&amp;plot_type={pt}" '
+            f'alt="{pt}" style="max-width:100%;height:auto;" '
+            f'onerror="{onerror}">'
+            f'</div>'
+        )
+
+    validation_passed = validation.get("passed", True)
+    validation_badge = (
+        '<span style="color:green;font-weight:bold;">PASSED</span>'
+        if validation_passed
+        else '<span style="color:red;font-weight:bold;">FAILED</span>'
+    )
+    findings_html = ""
+    for f in validation.get("findings", []):
+        color = {"error": "red", "warning": "orange"}.get(f.get("severity", ""), "#666")
+        findings_html += (
+            f'<div style="color:{color};margin:2px 0;">'
+            f'[{f.get("severity", "?")}] {f.get("message", "")}</div>'
+        )
+
+    viewer_link = ""
+    if session_id:
+        viewer_link = (
+            f'<p><a href="/viewer?session_id={session_id}">'
+            f'View provenance graph for session {session_id}</a></p>'
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OAS Dashboard — {run_id}</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #f5f7fa; color: #333; padding: 20px; }}
+  .header {{ background: #1a365d; color: white; padding: 20px 24px; border-radius: 8px;
+             margin-bottom: 20px; }}
+  .header h1 {{ font-size: 1.4em; margin-bottom: 8px; }}
+  .header .meta {{ font-size: 0.85em; opacity: 0.85; }}
+  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }}
+  .card {{ background: white; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+  .card h2 {{ font-size: 1em; color: #1a365d; margin-bottom: 10px; border-bottom: 1px solid #e2e8f0;
+              padding-bottom: 6px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
+  td {{ padding: 4px 8px; border-bottom: 1px solid #f0f0f0; }}
+  td:first-child {{ font-weight: 600; color: #555; width: 45%; }}
+  .plots {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+            gap: 16px; margin-bottom: 20px; }}
+  .plot-panel {{ background: white; border-radius: 8px; padding: 16px;
+                 box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+  .plot-panel h3 {{ font-size: 0.95em; color: #1a365d; margin-bottom: 10px; }}
+  .plot-panel img {{ border-radius: 4px; }}
+  .no-data {{ color: #999; font-style: italic; padding: 20px; text-align: center; }}
+  .footer {{ text-align: center; color: #999; font-size: 0.8em; margin-top: 20px; }}
+  a {{ color: #2b6cb0; }}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>{analysis_type.replace("_", " ").title()} Analysis{f" — {run_name}" if run_name else ""}</h1>
+  <div class="meta">
+    Run ID: {run_id} &nbsp;|&nbsp; Surfaces: {", ".join(surfaces) if surfaces else "N/A"}
+    &nbsp;|&nbsp; {timestamp}
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Flight Conditions</h2>
+    <table>{flight_rows if flight_rows else "<tr><td colspan='2' class='no-data'>No flight condition data</td></tr>"}</table>
+  </div>
+  <div class="card">
+    <h2>Key Results</h2>
+    <table>{scalar_rows if scalar_rows else "<tr><td colspan='2' class='no-data'>No scalar results</td></tr>"}</table>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Validation {validation_badge}</h2>
+    {findings_html if findings_html else '<p class="no-data">All checks passed</p>'}
+  </div>
+  <div class="card">
+    <h2>Links</h2>
+    {viewer_link}
+    <p><a href="/plot_types?run_id={run_id}">Available plot types (JSON)</a></p>
+  </div>
+</div>
+
+<h2 style="margin:20px 0 12px;color:#1a365d;">Plots</h2>
+<div class="plots">
+  {plot_panels}
+</div>
+
+<div class="footer">
+  Generated by OpenAeroStruct MCP Server
+</div>
+</body>
+</html>"""
+    return html
+
+
 class _ProvHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002
         pass  # Suppress request logging to avoid noise in MCP stdio output
@@ -173,6 +339,19 @@ class _ProvHandler(BaseHTTPRequestHandler):
                     self._json(types)
             except Exception as exc:
                 self._error(500, str(exc))
+        elif path in ("/dashboard", "/dashboard/"):
+            run_id = qs.get("run_id", [None])[0]
+            if not run_id:
+                self._error(400, "Missing run_id query parameter")
+                return
+            try:
+                html = generate_dashboard_html(run_id)
+                if html is None:
+                    self._error(404, f"Artifact not found: run_id={run_id!r}")
+                else:
+                    self._html(html)
+            except Exception as exc:
+                self._error(500, str(exc))
         else:
             self._error(404, f"Not found: {path}")
 
@@ -191,6 +370,14 @@ class _ProvHandler(BaseHTTPRequestHandler):
         data = _dumps(obj).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _html(self, content: str) -> None:
+        data = content.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

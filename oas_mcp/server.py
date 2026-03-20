@@ -136,6 +136,15 @@ OBSERVABILITY TOOLS:
   • get_last_logs(run_id)              — server-side log records for debugging
   • configure_session(session_id, ...) — set per-session defaults (detail level, auto-plots, etc.)
 
+VISUALIZATION OUTPUT MODES:
+  visualize() supports three output modes, controlled per-call (output=) or per-session
+  (configure_session(visualization_output=)):
+  • "inline" (default) — returns [metadata, ImageContent] — best for claude.ai
+  • "file"             — saves PNG to disk, returns [metadata] with file_path — no [image] noise in CLI
+  • "url"              — returns [metadata] with dashboard_url + plot_url — clickable links for CLI
+  The per-call output= parameter overrides the session default.
+  In CLI environments (Claude Code), prefer "file" or "url" mode to avoid unhelpful [image] output.
+
 PARAMETER TIPS:
   • Cruise conditions: velocity=248 m/s, Mach_number=0.84, density=0.38 kg/m³, re=1e6
   • Good starting mesh: num_x=2, num_y=7 (fast); use num_y=15 for higher fidelity
@@ -190,6 +199,24 @@ PROVENANCE & DECISION LOGGING:
 
 _sessions = SessionManager()
 _artifacts = ArtifactStore()
+
+
+def _get_viewer_base_url() -> str | None:
+    """Compute the base URL for the viewer/dashboard HTTP endpoints.
+
+    Uses RESOURCE_SERVER_URL (set on VPS deployments, e.g. https://mcp.lakesideai.dev)
+    if available.  Falls back to the local daemon thread viewer port for stdio transport.
+    Returns None if no viewer is reachable.
+    """
+    # VPS / HTTP transport: RESOURCE_SERVER_URL is authoritative
+    resource_url = os.environ.get("RESOURCE_SERVER_URL")
+    if resource_url:
+        return resource_url.rstrip("/")
+    # stdio transport: check if the local daemon viewer is running
+    prov_port = os.environ.get("OAS_PROV_PORT", "7654")
+    if os.environ.get("OAS_PROV_VIEWER", "").lower() != "off":
+        return f"http://localhost:{prov_port}"
+    return None
 
 # ---------------------------------------------------------------------------
 # Provenance tools registration
@@ -1595,6 +1622,14 @@ async def visualize(
     ],
     session_id: Annotated[str | None, "Session hint for faster artifact lookup"] = None,
     case_name: Annotated[str, "Human-readable label for the plot title"] = "",
+    output: Annotated[
+        str | None,
+        "Override visualization output mode for this call: "
+        "'inline' = PNG image (default for claude.ai), "
+        "'file' = save PNG to disk only (no [image] noise in CLI), "
+        "'url' = return dashboard URL (best for remote/VPS CLI). "
+        "When None, uses session default (set via configure_session).",
+    ] = None,
 ) -> list:
     """Generate a visualisation plot and return a base64-encoded PNG (or HTML for n2).
 
@@ -1615,6 +1650,11 @@ async def visualize(
       opt_comparison      — before/after DV comparison: initial vs optimized values
       n2                  — interactive N2/DSM diagram (saves HTML to disk, returns metadata with file_path)
 
+    Output modes (set per-call via 'output' param, or per-session via configure_session):
+      inline  — returns [metadata, ImageContent] (default, best for claude.ai)
+      file    — saves PNG to disk, returns [metadata] with file_path (no [image] noise in CLI)
+      url     — returns [metadata] with dashboard_url and plot_url (clickable links for CLI)
+
     Scoped to the authenticated user.
     """
     if plot_type not in PLOT_TYPES:
@@ -1623,18 +1663,29 @@ async def visualize(
             f"Supported: {sorted(PLOT_TYPES)}"
         )
 
+    if output is not None and output not in ("inline", "file", "url"):
+        raise ValueError(
+            f"Unknown output mode {output!r}. Use 'inline', 'file', or 'url'."
+        )
+
     user = get_current_user()
     artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id, user)
     if artifact is None:
         raise ValueError(f"Run '{run_id}' not found.")
 
+    # Resolve effective output mode: per-call override > session default
+    artifact_meta = artifact.get("metadata", {})
+    sid = artifact_meta.get("session_id", session_id or "default")
+    session = _sessions.get(sid)
+    effective_output = output or session.defaults.visualization_output
+
+    # Compute save_dir — always save when mode is "file" or "url", also for "inline"
+    _user = artifact_meta.get("user", user)
+    _project = artifact_meta.get("project", "default")
+    save_dir = str(_artifacts._data_dir / _user / _project / sid)
+
     # N2 diagram — needs a live OpenMDAO Problem, not artifact data
     if plot_type == "n2":
-        artifact_meta = artifact.get("metadata", {})
-        sid = artifact_meta.get("session_id", session_id or "default")
-        user = artifact_meta.get("user", get_current_user())
-        project = artifact_meta.get("project", "default")
-        session = _sessions.get(sid)
         analysis_type = artifact_meta.get("analysis_type", "aero")
         surfaces = artifact_meta.get("surfaces", [])
 
@@ -1648,12 +1699,12 @@ async def visualize(
                 f"No cached OpenMDAO Problem for run '{run_id}'. "
                 "Re-run the analysis in the current session, then call visualize again."
             )
-        output_dir = _artifacts._data_dir / user / project / sid
+        output_dir = _artifacts._data_dir / _user / _project / sid
         n2_result = await asyncio.to_thread(generate_n2, prob, run_id, case_name, output_dir)
         return [n2_result.metadata]
 
     results = artifact.get("results", {})
-    artifact_type = artifact.get("metadata", {}).get("analysis_type", "")
+    artifact_type = artifact_meta.get("analysis_type", "")
 
     # For optimization runs, the aerodynamic results live inside `final_results`.
     # Merge them into plot_results so lift_distribution / stress_distribution work.
@@ -1666,8 +1717,6 @@ async def visualize(
     standard = results.get("standard_detail", {})
 
     # For planform, prefer session-stored mesh snapshot (faster), fall back to artifact
-    sid = artifact.get("metadata", {}).get("session_id", session_id or "default")
-    session = _sessions.get(sid)
     mesh_snap = session.get_mesh_snapshot(run_id) or standard.get("mesh_snapshot", {})
     mesh_data = {"mesh_snapshot": mesh_snap} if mesh_snap else {}
     # Provide a mesh array for the planform plot from the first surface snapshot
@@ -1704,13 +1753,32 @@ async def visualize(
     plot_result = await asyncio.to_thread(
         generate_plot,
         plot_type, run_id, plot_results, conv_data, mesh_data, case_name, opt_history,
+        save_dir,
     )
     # Attach structured plot data so MCP Apps widget can render interactive Plotly charts.
     # Text/image clients (Claude) are unaffected — they use the PNG image as before.
     plot_result.metadata["plot_data"] = extract_plot_data(
         plot_type, plot_results, conv_data, mesh_data, opt_history
     )
-    return [plot_result.metadata, plot_result.image]
+
+    # Branch return based on output mode
+    if effective_output == "file":
+        # File mode: metadata only (PNG already saved to disk), no ImageContent noise
+        return [plot_result.metadata]
+    elif effective_output == "url":
+        # URL mode: add dashboard and plot URLs for clickable access in CLI
+        base_url = _get_viewer_base_url()
+        if base_url:
+            plot_result.metadata["dashboard_url"] = (
+                f"{base_url}/dashboard?run_id={run_id}"
+            )
+            plot_result.metadata["plot_url"] = (
+                f"{base_url}/plot?run_id={run_id}&plot_type={plot_type}"
+            )
+        return [plot_result.metadata]
+    else:
+        # Inline mode (default): metadata + ImageContent for claude.ai
+        return [plot_result.metadata, plot_result.image]
 
 
 @mcp.tool()
@@ -1804,6 +1872,13 @@ async def configure_session(
         str | None,
         "Project name for organising artifacts under {OAS_DATA_DIR}/{user}/{project}/",
     ] = None,
+    visualization_output: Annotated[
+        str | None,
+        "Default output mode for visualize(): "
+        "'inline' = PNG image (default, best for claude.ai), "
+        "'file' = save PNG to disk only (no [image] noise in CLI), "
+        "'url' = return dashboard/plot URLs (best for remote/VPS CLI)",
+    ] = None,
 ) -> dict:
     """Configure per-session defaults to reduce repeated arguments.
 
@@ -1824,6 +1899,11 @@ async def configure_session(
     requirements:
         Dot-path requirements checked after every analysis in this session.
         Failed requirements appear as "error" findings in the validation block.
+    visualization_output:
+        Default output mode for all visualize() calls in this session.
+        'inline' = return metadata + ImageContent (default, for claude.ai).
+        'file' = save PNG to disk, return metadata with file_path (CLI-friendly).
+        'url' = return metadata with dashboard_url and plot_url (for VPS CLI).
     """
     session = _sessions.get(session_id)
 
@@ -1855,6 +1935,13 @@ async def configure_session(
     if project is not None:
         validate_safe_name(project, "project")
         updates["project"] = project
+
+    if visualization_output is not None:
+        if visualization_output not in ("inline", "file", "url"):
+            raise ValueError(
+                "visualization_output must be 'inline', 'file', or 'url'"
+            )
+        updates["visualization_output"] = visualization_output
 
     if updates:
         session.configure(**updates)

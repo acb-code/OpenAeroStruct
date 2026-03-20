@@ -136,6 +136,26 @@ async def plot_endpoint(request: Request) -> Response:
 
 
 @_require_auth
+async def dashboard_endpoint(request: Request) -> Response:
+    """Serve a context-rich HTML dashboard for a given run_id."""
+    from oas_mcp.provenance.viewer_server import generate_dashboard_html
+
+    run_id = request.query_params.get("run_id")
+    if not run_id:
+        return JSONResponse({"error": "Missing run_id query parameter"}, status_code=400)
+    try:
+        html = await asyncio.to_thread(generate_dashboard_html, run_id)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    if html is None:
+        return JSONResponse(
+            {"error": f"Artifact not found: run_id={run_id!r}"}, status_code=404
+        )
+    return HTMLResponse(html)
+
+
+@_require_auth
 async def plot_types_endpoint(request: Request) -> Response:
     """Return JSON list of applicable plot types for a run."""
     from oas_mcp.provenance.viewer_server import get_plot_types_for_run
@@ -182,6 +202,8 @@ def build_viewer_app() -> Starlette | None:
         Route("/graph", graph_endpoint),
         Route("/plot", plot_endpoint),
         Route("/plot_types", plot_types_endpoint),
+        Route("/dashboard", dashboard_endpoint),
+        Route("/dashboard/", dashboard_endpoint),
     ]
 
     app = Starlette(
@@ -201,7 +223,7 @@ def build_viewer_app() -> Starlette | None:
 
 
 # Paths the viewer app handles — used by the fallback dispatcher.
-_VIEWER_PATHS = frozenset({"/viewer", "/viewer/", "/sessions", "/graph", "/plot", "/plot_types"})
+_VIEWER_PATHS = frozenset({"/viewer", "/viewer/", "/sessions", "/graph", "/plot", "/plot_types", "/dashboard", "/dashboard/"})
 
 
 def make_fallback_app(viewer_app: Starlette, fallback_app) -> Starlette:

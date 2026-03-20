@@ -81,6 +81,18 @@ NOTE: All *_cp arrays use ROOT-to-TIP ordering: cp[0]=root, cp[-1]=tip.
   delete_artifact(run_id, session_id?)          remove permanently
   oas://artifacts/{run_id}                      resource access by run_id
 
+## visualize — output modes
+  output="inline" (default)  returns [metadata, ImageContent] — best for claude.ai
+  output="file"              saves PNG to disk, returns [metadata] with file_path — CLI-friendly
+  output="url"               returns [metadata] with dashboard_url + plot_url — VPS CLI
+  Per-call: visualize(run_id, plot_type, output="file")
+  Per-session: configure_session(visualization_output="url")
+
+## Dashboard
+  /dashboard?run_id=<id>   context-rich HTML page (flight conds, results, plots, validation)
+  Local:  http://localhost:7654/dashboard?run_id=X  (no auth)
+  VPS:    https://<host>/dashboard?run_id=X         (Basic Auth)
+
 ## Common errors and fixes
   "num_y must be odd"           → change num_y to nearest odd number
   "missing structural props"    → re-create surface with fem_model_type="tube"

@@ -57,3 +57,12 @@ exported JSON file onto the page.
 - Use `log_decision` before choosing design variables or interpreting surprising results.
 - Pass `prior_call_id` whenever the decision is directly informed by a specific tool result.
 - Call `export_session_graph` at the end and mention the file path in the summary.
+
+### Visualization in CLI environments
+
+MCP `ImageContent` renders as `[image]` in CLI — not useful. Use output modes instead:
+
+- `configure_session(visualization_output="file")` — saves PNGs to disk, no `[image]` noise
+- `configure_session(visualization_output="url")` — returns clickable dashboard/plot URLs
+- Per-call override: `visualize(run_id, plot_type, output="file")`
+- Dashboard: `http://localhost:7654/dashboard?run_id=<id>` shows results + plots in browser

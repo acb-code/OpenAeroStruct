@@ -67,6 +67,8 @@ class SessionDefaults:
     auto_visualize: list[str] = field(default_factory=list)
     # "off" | "logging" | "otel" — overrides OAS_TELEMETRY_MODE env var for this session
     telemetry_mode: str | None = None
+    # "inline" (default) | "file" | "url" — controls what visualize() returns
+    visualization_output: str = "inline"
 
     def to_dict(self) -> dict:
         return {
@@ -74,6 +76,7 @@ class SessionDefaults:
             "validation_severity_threshold": self.validation_severity_threshold,
             "auto_visualize": self.auto_visualize,
             "telemetry_mode": self.telemetry_mode,
+            "visualization_output": self.visualization_output,
         }
 
 
@@ -237,6 +240,7 @@ class Session:
         valid_fields = {
             "default_detail_level", "validation_severity_threshold",
             "auto_visualize", "telemetry_mode", "project",
+            "visualization_output",
         }
         for key, value in kwargs.items():
             if key not in valid_fields:

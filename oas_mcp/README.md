@@ -722,12 +722,30 @@ plot = visualize(run_id=run_id, plot_type="lift_distribution", case_name="CRM cr
 
 Call `get_run(run_id)["available_plots"]` to see which types are available for a given run before calling `visualize`.
 
+**Output modes** — control how `visualize()` returns results (especially useful for CLI environments where `[image]` text is unhelpful):
+
+| Mode | Returns | Best for |
+|------|---------|----------|
+| `"inline"` (default) | metadata + ImageContent | claude.ai |
+| `"file"` | metadata with `file_path` | Claude Code (local) |
+| `"url"` | metadata with `dashboard_url` + `plot_url` | Claude Code (VPS) |
+
+```python
+# Per-session: set once, applies to all visualize() calls
+configure_session(visualization_output="url")
+
+# Per-call: overrides session default
+visualize(run_id=run_id, plot_type="lift_distribution", output="file")
+```
+
 Auto-generate plots after every analysis:
 
 ```python
 configure_session(auto_visualize=["lift_distribution"])
 # envelope["auto_plots"]["lift_distribution"] is now present in every analysis response
 ```
+
+**Dashboard** — `/dashboard?run_id=X` serves a context-rich HTML page with flight conditions, key results, validation status, and all applicable plots. Available on both local (`localhost:7654`) and VPS (`RESOURCE_SERVER_URL`) deployments.
 
 For the complete guide with all plot types, response format, and progressive zoom workflow, see **[visualization.md](visualization.md)**.
 
@@ -1149,18 +1167,25 @@ Standard detail is persisted at run time and survives cache eviction. See [obser
 
 ### `visualize`
 
-Generate a plot and return a base64-encoded PNG.
+Generate a plot and return a base64-encoded PNG (or metadata-only in file/url mode).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `run_id` | str | — | Run ID to visualise |
-| `plot_type` | str | — | One of: `lift_distribution`, `drag_polar`, `stress_distribution`, `convergence`, `planform` |
+| `plot_type` | str | — | One of: `lift_distribution`, `drag_polar`, `stress_distribution`, `convergence`, `planform`, `opt_history`, `opt_dv_evolution`, `opt_comparison`, `n2` |
 | `session_id` | str | `None` | Optional hint |
 | `case_name` | str | `""` | Human-readable label for the plot title |
+| `output` | str | `None` | Override output mode: `"inline"`, `"file"`, or `"url"`. When `None`, uses session default. |
 
-**Returns:** `{plot_type, run_id, format, width_px, height_px, image_hash, image_base64}`
+**Returns** (varies by output mode):
 
-All plots are 900×540 px PNG. `image_hash` is the first 8 hex chars of SHA-256(png_bytes) for client-side caching. See [visualization.md](visualization.md) for full guide.
+| Mode | Response |
+|------|----------|
+| `"inline"` (default) | `[{metadata}, ImageContent]` |
+| `"file"` | `[{metadata with file_path}]` — PNG saved to `{data_dir}/.../plots/{run_id}_{plot_type}.png` |
+| `"url"` | `[{metadata with dashboard_url, plot_url}]` — clickable links to the dashboard and direct PNG |
+
+All plots are 900×540 px PNG. `image_hash` is the first 16 hex chars of SHA-256(png_bytes) for client-side caching. See [visualization.md](visualization.md) for full guide.
 
 ---
 
@@ -1190,6 +1215,7 @@ Set per-session defaults that apply to all subsequent calls in the session.
 | `auto_visualize` | str[] | `None` | Plot types to auto-generate with each analysis |
 | `telemetry_mode` | str | `None` | `"off"`, `"logging"`, or `"otel"` |
 | `requirements` | dict[] | `None` | Requirements checked against every result |
+| `visualization_output` | str | `None` | Default output mode for `visualize()`: `"inline"`, `"file"`, or `"url"` |
 
 **Returns:** `{session_id, status, current_defaults, requirements_count}`
 

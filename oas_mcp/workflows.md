@@ -174,3 +174,27 @@ Open oas_mcp/provenance/viewer/index.html in a browser.
   • Connect live: http://127.0.0.1:7654/viewer (started automatically with the server)
   • Click any node to inspect inputs/outputs or reasoning
   • Toggle FSM mode to collapse repeated tool calls into state transitions
+
+---
+## CLI Visualization Tips
+
+In CLI environments (Claude Code, Codex), MCP images render as `[image]` — not useful.
+Use output modes to get plots as files or clickable URLs instead:
+
+```python
+# Option 1: Set session default (applies to all visualize calls)
+configure_session(visualization_output="file")   # saves PNGs to disk
+configure_session(visualization_output="url")    # returns clickable dashboard URLs
+
+# Option 2: Per-call override
+visualize(run_id=run_id, plot_type="lift_distribution", output="file")
+visualize(run_id=run_id, plot_type="stress_distribution", output="url")
+```
+
+### Dashboard
+
+Every run has a context-rich HTML dashboard at `/dashboard?run_id=X` that shows
+flight conditions, key results, validation status, and all applicable plots.
+
+  • Local:  http://localhost:7654/dashboard?run_id=X  (no auth)
+  • VPS:    https://<RESOURCE_SERVER_URL>/dashboard?run_id=X  (Basic Auth)

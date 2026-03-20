@@ -445,6 +445,7 @@ configure_session(
     validation_severity_threshold="warning",   # only show errors and warnings in validation
     auto_visualize=["lift_distribution"],       # auto-generate these plots after each analysis
     telemetry_mode="logging",                   # override OAS_TELEMETRY_MODE for this session
+    visualization_output="file",               # "inline" | "file" | "url" — controls visualize() return
     requirements=[                             # checked against every result in this session
         {"path": "CL",           "operator": ">=", "value": 0.4,  "label": "min_CL"},
         {"path": "L_over_D",     "operator": ">",  "value": 10.0, "label": "min_LD"},
@@ -460,6 +461,7 @@ configure_session(
 | `validation_severity_threshold` | `"error"`, `"warning"`, `"info"` | `"info"` | Suppress findings below this severity from the validation block |
 | `auto_visualize` | list of plot type strings | `[]` | Plot types to auto-generate and return in `auto_plots` after each analysis |
 | `telemetry_mode` | `"off"`, `"logging"`, `"otel"` | from env | Per-session override for telemetry mode |
+| `visualization_output` | `"inline"`, `"file"`, `"url"` | `"inline"` | Default output mode for `visualize()` — see [visualization.md](visualization.md#output-modes) |
 | `requirements` | list of requirement dicts | `[]` | See [Custom requirements](#custom-requirements) |
 
 ### Auto-visualization
