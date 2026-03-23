@@ -42,6 +42,8 @@ Run a wing design optimization using the OpenAeroStruct MCP server.
 
 7. **Export provenance** — call `export_session_graph(session_id=<session_id>)` to capture the
    full decision audit trail including DV selection rationale and convergence assessment.
+   The response includes `viewer_url` and `dashboard_hint` — share these with the user
+   so they can explore the provenance graph and run dashboards in a browser.
 
 ## SLSQP scaling — critical for convergence
 

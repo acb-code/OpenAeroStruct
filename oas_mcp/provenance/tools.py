@@ -104,4 +104,19 @@ async def export_session_graph(
         p.write_text(_dumps(graph), encoding="utf-8")
         written_path = str(p)
 
-    return {**graph, "path": written_path}
+    # Include viewer URL so agents can surface it to users
+    viewer_url: str | None = None
+    dashboard_hint: str | None = None
+    try:
+        from oas_mcp.server import _get_viewer_base_url
+        base = _get_viewer_base_url()
+        if base:
+            viewer_url = f"{base}/viewer?session_id={sid}"
+            dashboard_hint = (
+                f"View this session's provenance graph at: {viewer_url}\n"
+                f"Run dashboards are at: {base}/dashboard?run_id=<run_id>"
+            )
+    except Exception:
+        pass
+
+    return {**graph, "path": written_path, "viewer_url": viewer_url, "dashboard_hint": dashboard_hint}
