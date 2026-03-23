@@ -320,17 +320,17 @@ def plot_drag_polar(run_id: str, results: dict, case_name: str = "", *, save_dir
 
 
 def plot_stress_distribution(run_id: str, results: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
-    """Plot spanwise von Mises stress and failure index distribution.
+    """Plot spanwise von Mises stress with yield stress reference line.
 
     Looks for per-surface ``sectional_data.vonmises_MPa`` and
-    ``sectional_data.failure_index``.  Falls back to scalar values if arrays
-    are unavailable.
+    ``sectional_data.yield_stress_MPa``.  Falls back to scalar
+    ``max_vonmises_Pa`` if the per-element array is unavailable.
     """
     _require_mpl()
     import matplotlib.pyplot as plt
 
     title = f"Stress Distribution — {case_name}" if case_name else "Stress Distribution"
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(_FIG_WIDTH_IN, _FIG_HEIGHT_IN))
+    fig, ax = plt.subplots(1, 1, figsize=(_FIG_WIDTH_IN, _FIG_HEIGHT_IN))
     fig.suptitle(f"{title}\n(run_id: {run_id})", fontsize=9, y=0.98)
 
     def _elem_y(y_nodes: list, n_elem: int) -> list | None:
@@ -347,21 +347,22 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "", *,
         return None
 
     plotted = False
+    max_yield = 0.0
+
     for surf_name, surf_res in results.get("surfaces", {}).items():
         sectional = surf_res.get("sectional_data", {})
         y_nodes = sectional.get("y_span_norm")
         vm = sectional.get("vonmises_MPa")
-        fi = sectional.get("failure_index")
 
         if y_nodes and vm:
             y_vm = _elem_y(y_nodes, len(vm))
             if y_vm is not None:
-                ax1.plot(y_vm, vm, label=surf_name, linewidth=1.5)
+                ax.plot(y_vm, vm, label=surf_name, linewidth=2)
                 plotted = True
             else:
                 max_vm = surf_res.get("max_vonmises_Pa")
                 if max_vm is not None:
-                    ax1.axhline(
+                    ax.axhline(
                         max_vm / 1e6, linestyle="--",
                         label=f"{surf_name} max={max_vm/1e6:.1f} MPa",
                         linewidth=1.5,
@@ -370,50 +371,34 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "", *,
         else:
             max_vm = surf_res.get("max_vonmises_Pa")
             if max_vm is not None:
-                ax1.axhline(
+                ax.axhline(
                     max_vm / 1e6, linestyle="--",
                     label=f"{surf_name} max={max_vm/1e6:.1f} MPa",
                     linewidth=1.5,
                 )
                 plotted = True
 
-        if y_nodes and fi:
-            y_fi = _elem_y(y_nodes, len(fi))
-            if y_fi is not None:
-                ax2.plot(y_fi, fi, label=surf_name, linewidth=1.5)
-            else:
-                failure = surf_res.get("failure")
-                if failure is not None:
-                    ax2.axhline(
-                        failure, linestyle="--",
-                        label=f"{surf_name} failure={failure:.3f}",
-                        linewidth=1.5,
-                    )
-        else:
-            failure = surf_res.get("failure")
-            if failure is not None:
-                ax2.axhline(
-                    failure, linestyle="--",
-                    label=f"{surf_name} failure={failure:.3f}",
-                    linewidth=1.5,
-                )
+        # Allowable stress reference line (yield / safety_factor)
+        yield_mpa = sectional.get("yield_stress_MPa")
+        sf = sectional.get("safety_factor", 1.0)
+        if yield_mpa is not None:
+            allowable_mpa = yield_mpa / sf
+            ax.axhline(allowable_mpa, color="r", linewidth=2, linestyle="--")
+            max_yield = max(max_yield, allowable_mpa)
 
-    ax1.set_xlabel("Normalised spanwise station η  [—]   (0 = root, 1 = tip)")
-    ax1.set_ylabel("von Mises stress  [MPa]")
-    ax1.set_title("Von Mises Stress", fontsize=8)
-    ax1.legend(fontsize=7)
-    ax1.grid(True, alpha=0.3)
+    if max_yield > 0:
+        ax.set_ylim([0, max_yield * 1.1])
+        ax.text(0.075, 1.03, "failure limit", transform=ax.transAxes, color="r", fontsize=8)
 
-    ax2.axhline(0.0, color="red", linewidth=1.0, linestyle="--", label="Failure threshold")
-    ax2.set_xlabel("Normalised spanwise station η  [—]   (0 = root, 1 = tip)")
-    ax2.set_ylabel("Failure index  [—]")
-    ax2.set_title("Structural Failure Index", fontsize=8)
-    ax2.legend(fontsize=7)
-    ax2.grid(True, alpha=0.3)
+    ax.set_xlabel("Normalised spanwise station η  [—]   (0 = root, 1 = tip)")
+    ax.set_ylabel("von Mises stress  [MPa]")
+    if plotted:
+        ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
 
     if not plotted:
-        ax1.text(0.5, 0.5, "No stress data available", transform=ax1.transAxes,
-                 ha="center", va="center", fontsize=10, color="gray")
+        ax.text(0.5, 0.5, "No stress data available", transform=ax.transAxes,
+                ha="center", va="center", fontsize=10, color="gray")
 
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     return _fig_to_response(fig, run_id, "stress_distribution", save_dir=save_dir)

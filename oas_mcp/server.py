@@ -1326,7 +1326,12 @@ async def run_optimization(
         inputs["Mach_number"] = Mach_number
         inputs["density"] = density
 
-    findings = validate_optimization(result, context={"analysis_type": analysis_type})
+    findings = validate_optimization(result, context={
+        "analysis_type": analysis_type,
+        "max_iterations": max_iterations,
+        "objective_scaler": objective_scaler,
+        "design_variables": [dv if isinstance(dv, dict) else {"name": dv} for dv in design_variables],
+    })
     return await _finalize_analysis(
         tool_name="run_optimization", run_id=run_id,
         session=session, session_id=session_id, surfaces=surfaces,

@@ -449,6 +449,7 @@ def validate_stability(results: dict, context: dict | None = None) -> list[Valid
 def validate_optimization(results: dict, context: dict | None = None) -> list[ValidationFinding]:
     """Validate optimization results."""
     findings: list[ValidationFinding] = []
+    ctx = context or {}
 
     success = results.get("success", False)
     findings.append(ValidationFinding(
@@ -473,5 +474,150 @@ def validate_optimization(results: dict, context: dict | None = None) -> list[Va
         CD = final.get("CD", 0.0)
         findings.append(_check_cd_positive(CD))
         findings.append(_check_cd_not_too_large(CD))
+
+    # --- Convergence diagnostics (especially useful when success=False) ---
+    findings.extend(_diagnose_optimization(results, ctx))
+
+    return findings
+
+
+def _diagnose_optimization(
+    results: dict, context: dict
+) -> list[ValidationFinding]:
+    """Generate diagnostic findings from optimization history and final state.
+
+    These provide actionable remediation hints beyond the generic "did not
+    converge" message — e.g. scaling issues, constraint violations, DVs pinned
+    at bounds.
+    """
+    findings: list[ValidationFinding] = []
+    final = results.get("final_results", {})
+    history = results.get("optimization_history", {})
+    obj_vals = history.get("objective_values", [])
+
+    # 1. Iteration-limit check
+    max_iters = context.get("max_iterations", 200)
+    n_iters = history.get("num_iterations", len(obj_vals))
+    if n_iters >= max_iters:
+        findings.append(ValidationFinding(
+            check_id="numerics.iteration_limit_reached",
+            category="numerics",
+            severity="warning",
+            confidence="high",
+            passed=False,
+            message=f"Optimizer used all {n_iters} iterations (limit={max_iters})",
+            remediation=(
+                "The optimizer exhausted its iteration budget. "
+                "Increase max_iterations, or improve scaling "
+                "(objective_scaler, DV scaler) to help SLSQP converge faster."
+            ),
+        ))
+
+    # 2. Objective scaling heuristic
+    if obj_vals:
+        obj_magnitude = abs(obj_vals[0])
+        obj_scaler = context.get("objective_scaler", 1.0)
+        scaled_magnitude = obj_magnitude * obj_scaler
+        if scaled_magnitude > 1e4 or scaled_magnitude < 1e-4:
+            findings.append(ValidationFinding(
+                check_id="numerics.objective_scaling",
+                category="numerics",
+                severity="warning",
+                confidence="medium",
+                passed=False,
+                message=(
+                    f"Objective magnitude ≈ {obj_magnitude:.2e} with scaler={obj_scaler} "
+                    f"→ scaled value ≈ {scaled_magnitude:.2e} (ideal range: 0.1–100)"
+                ),
+                remediation=(
+                    f"SLSQP works best when the scaled objective is O(1). "
+                    f"Try objective_scaler ≈ {1.0 / obj_magnitude:.1e}."
+                ),
+            ))
+
+    # 3. Constraint violations at termination
+    for surf_name, surf_res in final.get("surfaces", {}).items():
+        failure = surf_res.get("failure")
+        if failure is not None and failure > 1e-6:
+            findings.append(ValidationFinding(
+                check_id=f"constraints.failure_violated.{surf_name}",
+                category="constraints",
+                severity="error",
+                confidence="high",
+                passed=False,
+                message=(
+                    f"Surface '{surf_name}': failure = {failure:.4f} > 0 "
+                    f"(max stress exceeds allowable by {failure * 100:.1f}%)"
+                ),
+                remediation=(
+                    "The structural failure constraint is violated at the optimum. "
+                    "This usually means the optimizer could not find a feasible design. "
+                    "Try: thicker initial thickness_cp, wider thickness bounds, "
+                    "or add objective_scaler/DV scaler to improve convergence."
+                ),
+            ))
+
+    # 4. Design variables pinned at bounds
+    dv_history = history.get("dv_history", {})
+    opt_dvs = results.get("optimized_design_variables", {})
+    initial_dvs = history.get("initial_dvs", {})
+    dv_specs = context.get("design_variables", [])
+    dv_bounds = {dv["name"]: dv for dv in dv_specs if isinstance(dv, dict)}
+
+    for dv_name, final_val in opt_dvs.items():
+        spec = dv_bounds.get(dv_name, {})
+        lower = spec.get("lower")
+        upper = spec.get("upper")
+        if lower is None or upper is None:
+            continue
+        vals = final_val if isinstance(final_val, list) else [final_val]
+        pinned = []
+        for i, v in enumerate(vals):
+            bound_range = abs(upper - lower)
+            if bound_range == 0:
+                continue
+            tol = bound_range * 1e-4
+            if abs(v - lower) < tol:
+                pinned.append(f"[{i}] at lower={lower}")
+            elif abs(v - upper) < tol:
+                pinned.append(f"[{i}] at upper={upper}")
+        if pinned:
+            findings.append(ValidationFinding(
+                check_id=f"numerics.dv_at_bound.{dv_name}",
+                category="numerics",
+                severity="warning",
+                confidence="medium",
+                passed=False,
+                message=f"DV '{dv_name}' pinned at bound: {', '.join(pinned)}",
+                remediation=(
+                    f"Design variable '{dv_name}' hit its bound, which may indicate "
+                    f"the bound is too restrictive or the optimizer wants to go further. "
+                    f"Consider widening the bounds for '{dv_name}'."
+                ),
+            ))
+
+    # 5. Objective stagnation (last 20% of iterations show < 0.1% change)
+    if len(obj_vals) >= 10:
+        tail_start = int(len(obj_vals) * 0.8)
+        tail = obj_vals[tail_start:]
+        if len(tail) >= 2 and tail[0] != 0:
+            rel_change = abs(tail[-1] - tail[0]) / abs(tail[0])
+            if rel_change < 1e-3:
+                findings.append(ValidationFinding(
+                    check_id="numerics.objective_stagnant",
+                    category="numerics",
+                    severity="info",
+                    confidence="medium",
+                    passed=True,
+                    message=(
+                        f"Objective changed < 0.1% over final {len(tail)} iterations "
+                        f"({tail[0]:.4e} → {tail[-1]:.4e})"
+                    ),
+                    remediation=(
+                        "The objective plateaued. If the optimizer did not converge, "
+                        "this suggests it is near a local minimum but constraints "
+                        "may be preventing further progress."
+                    ),
+                ))
 
     return findings

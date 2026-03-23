@@ -184,7 +184,7 @@ def _extract_drag_polar(results: dict) -> dict:
 
 
 def _extract_stress_distribution(results: dict) -> dict:
-    """Extract spanwise stress/failure index for Plotly."""
+    """Extract spanwise von Mises stress with yield reference for Plotly."""
     traces = []
 
     def _elem_y(y_nodes: list, n_elem: int) -> list | None:
@@ -194,53 +194,48 @@ def _extract_stress_distribution(results: dict) -> dict:
             return [(y_nodes[i] + y_nodes[i + 1]) / 2.0 for i in range(n_elem)]
         return None
 
+    max_yield = 0.0
     for surf_name, surf_res in results.get("surfaces", {}).items():
         sectional = surf_res.get("sectional_data", {})
         y_nodes = sectional.get("y_span_norm")
         vm = sectional.get("vonmises_MPa")
-        fi = sectional.get("failure_index")
 
         if y_nodes and vm:
             y_vm = _elem_y(y_nodes, len(vm))
             if y_vm is not None:
                 traces.append({
-                    "kind": "bar",
+                    "kind": "scatter",
                     "x": list(y_vm),
                     "y": list(vm),
                     "name": f"{surf_name} von Mises [MPa]",
-                    "yaxis": "y1",
-                })
-
-        if y_nodes and fi:
-            y_fi = _elem_y(y_nodes, len(fi))
-            if y_fi is not None:
-                traces.append({
-                    "kind": "scatter",
-                    "x": list(y_fi),
-                    "y": list(fi),
-                    "name": f"{surf_name} failure index",
                     "mode": "lines+markers",
-                    "yaxis": "y2",
                 })
 
-    # Failure threshold reference line
-    traces.append({
-        "kind": "hline",
-        "y": 0.0,
-        "name": "Failure threshold",
-        "yaxis": "y2",
-        "line": {"color": "red", "dash": "dash"},
-    })
+        # Allowable stress reference line (yield / safety_factor)
+        yield_mpa = sectional.get("yield_stress_MPa")
+        sf = sectional.get("safety_factor", 1.0)
+        if yield_mpa is not None:
+            max_yield = max(max_yield, yield_mpa / sf)
 
-    return {
+    if max_yield > 0:
+        traces.append({
+            "kind": "hline",
+            "y": max_yield,
+            "name": "failure limit",
+            "line": {"color": "red", "dash": "dash", "width": 2},
+        })
+
+    layout: dict = {
         "type": "stress_distribution",
         "interactive": True,
         "traces": traces,
         "xaxis": {"title": "Normalised spanwise station η  [—]  (0=root, 1=tip)"},
         "yaxis": {"title": "von Mises stress  [MPa]"},
-        "yaxis2": {"title": "Failure index  [—]", "overlaying": "y", "side": "right"},
         "title": "Stress Distribution",
     }
+    if max_yield > 0:
+        layout["yaxis"]["range"] = [0, max_yield * 1.1]
+    return layout
 
 
 def _extract_planform(mesh_data: dict) -> dict:

@@ -107,9 +107,9 @@ class TestLiftDistribution:
 
 
 class TestStressDistribution:
-    """Bug A+B: vonmises per element, failure_index derived from scalar."""
+    """Stress distribution: vonmises per element with yield stress line."""
 
-    def _make_struct_results(self, ny: int, include_failure: bool = True) -> dict:
+    def _make_struct_results(self, ny: int, include_yield: bool = True) -> dict:
         n_elem = ny - 1
         y_nodes = [i / (ny - 1) for i in range(ny)]
         vm = [100.0 + 50.0 * i for i in range(n_elem)]
@@ -117,9 +117,9 @@ class TestStressDistribution:
             "y_span_norm": y_nodes,
             "vonmises_MPa": vm,
         }
-        if include_failure:
-            # failure_index: ny-1 values
-            sect["failure_index"] = [v / 200.0 - 1.0 for v in vm]
+        if include_yield:
+            sect["yield_stress_MPa"] = 500.0
+            sect["safety_factor"] = 2.5
         surf_results = {
             "sectional_data": sect,
             "max_vonmises_Pa": max(vm) * 1e6,
@@ -130,13 +130,13 @@ class TestStressDistribution:
 
     def test_vonmises_per_element(self):
         """vonmises_MPa with ny-1 values renders a line plot."""
-        results = self._make_struct_results(ny=5, include_failure=False)
+        results = self._make_struct_results(ny=5, include_yield=False)
         img = plot_stress_distribution(_RUN_ID, results)
         assert _is_valid_plot(img)
 
-    def test_failure_index_present(self):
-        """failure_index renders on both stress and failure panels."""
-        results = self._make_struct_results(ny=5, include_failure=True)
+    def test_yield_stress_line(self):
+        """yield_stress_MPa renders a red dashed reference line."""
+        results = self._make_struct_results(ny=5, include_yield=True)
         img = plot_stress_distribution(_RUN_ID, results)
         assert _is_valid_plot(img)
 
@@ -153,7 +153,6 @@ class TestStressDistribution:
                 "wing": {
                     "sectional_data": {},
                     "max_vonmises_Pa": 250e6,
-                    "failure": 0.3,
                 }
             }
         }

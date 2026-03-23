@@ -267,6 +267,12 @@ def extract_standard_detail(
                     # Reverse to match sorted y_span_norm (root→tip)
                     sect["vonmises_MPa"] = (vm_per_elem[::-1] / 1e6).tolist()
 
+            # Store yield stress for plotting (yield line reference)
+            yield_stress = surface.get("yield", 500e6)
+            safety_factor = surface.get("safety_factor", 2.5)
+            sect["yield_stress_MPa"] = yield_stress / 1e6
+            sect["safety_factor"] = safety_factor
+
             # Failure index distribution (per element)
             fi_path = f"{perf}.failure"
             fi_val = _try_get(prob, fi_path)
@@ -277,8 +283,6 @@ def extract_standard_detail(
                 elif "vonmises_MPa" in sect:
                     # FailureKS returns a scalar; derive per-element failure index
                     # from vonmises: failure_i = vm / sigma_allow - 1
-                    yield_stress = surface.get("yield", 500e6)
-                    safety_factor = surface.get("safety_factor", 2.5)
                     sigma_allow = yield_stress / safety_factor
                     vm_pa = np.array(sect["vonmises_MPa"]) * 1e6
                     sect["failure_index"] = (vm_pa / sigma_allow - 1.0).tolist()
