@@ -200,6 +200,25 @@ PROVENANCE & DECISION LOGGING:
 _sessions = SessionManager()
 _artifacts = ArtifactStore()
 
+_LATEST_SENTINELS = {"latest", "last"}
+
+
+async def _resolve_run_id(
+    run_id: str, session_id: str | None = None
+) -> str:
+    """Resolve ``"latest"``/``"last"`` to the most recent run_id for the current user."""
+    if run_id.lower() in _LATEST_SENTINELS:
+        user = get_current_user()
+        resolved = await asyncio.to_thread(
+            _artifacts.get_latest, user, None, session_id
+        )
+        if resolved is None:
+            raise ValueError(
+                "No runs found for the current user. Run an analysis first."
+            )
+        return resolved
+    return run_id
+
 
 def _get_viewer_base_url() -> str | None:
     """Compute the base URL for the viewer/dashboard HTTP endpoints.
@@ -1445,6 +1464,7 @@ async def get_run(
 
     Scoped to the authenticated user.
     """
+    run_id = await _resolve_run_id(run_id, session_id)
     user = get_current_user()
     artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id, user)
     if artifact is None:
@@ -1581,6 +1601,7 @@ async def get_detailed_results(
 
     Scoped to the authenticated user.
     """
+    run_id = await _resolve_run_id(run_id, session_id)
     user = get_current_user()
     artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id, user)
     if artifact is None:
@@ -1668,6 +1689,7 @@ async def visualize(
             f"Unknown output mode {output!r}. Use 'inline', 'file', or 'url'."
         )
 
+    run_id = await _resolve_run_id(run_id, session_id)
     user = get_current_user()
     artifact = await asyncio.to_thread(_artifacts.get, run_id, session_id, user)
     if artifact is None:
@@ -1830,6 +1852,7 @@ async def get_last_logs(
     Returns a list of log records with time, level, message, and logger name.
     Returns empty list if no logs were captured for this run_id.
     """
+    run_id = await _resolve_run_id(run_id)
     logs = get_run_logs(run_id)
     if logs is None:
         logs = []

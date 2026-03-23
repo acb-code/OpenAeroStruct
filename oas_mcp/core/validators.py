@@ -8,6 +8,11 @@ def validate_positive(value, name: str) -> None:
         raise ValueError(f"{name} must be positive, got {value}")
 
 
+def validate_non_negative(value, name: str) -> None:
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value}")
+
+
 def validate_mesh_params(num_x: int, num_y: int) -> None:
     if num_x < 2:
         raise ValueError(f"num_x must be >= 2, got {num_x}")
@@ -34,7 +39,7 @@ def validate_fem_model_type(fem_model_type: str) -> None:
 
 def validate_flight_conditions(velocity, alpha, Mach_number, reynolds_number, density) -> None:
     validate_positive(velocity, "velocity")
-    validate_positive(Mach_number, "Mach_number")
+    validate_non_negative(Mach_number, "Mach_number")
     validate_positive(reynolds_number, "reynolds_number")
     validate_positive(density, "density")
     if not (-90 <= alpha <= 90):
@@ -95,8 +100,8 @@ def validate_flight_points(flight_points: list[dict]) -> None:
             )
         if fp["velocity"] <= 0:
             raise ValueError(f"flight_points[{i}].velocity must be positive, got {fp['velocity']}")
-        if fp["Mach_number"] <= 0:
-            raise ValueError(f"flight_points[{i}].Mach_number must be positive, got {fp['Mach_number']}")
+        if fp["Mach_number"] < 0:
+            raise ValueError(f"flight_points[{i}].Mach_number must be non-negative, got {fp['Mach_number']}")
         if fp["density"] <= 0:
             raise ValueError(f"flight_points[{i}].density must be positive, got {fp['density']}")
         if fp["reynolds_number"] <= 0:

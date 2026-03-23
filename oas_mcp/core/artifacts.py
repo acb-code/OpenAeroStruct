@@ -321,6 +321,27 @@ class ArtifactStore:
 
             return entries
 
+    def get_latest(
+        self,
+        user: str | None = None,
+        project: str | None = None,
+        session_id: str | None = None,
+    ) -> str | None:
+        """Return the run_id of the most recent artifact, or ``None``.
+
+        Scans all matching (user, project, session) directories and returns
+        the run_id with the lexicographically greatest timestamp prefix.
+        """
+        with self._lock:
+            latest_rid: str | None = None
+            for u, p, s in self._iter_session_triples(user, project, session_id):
+                index = self._load_index(u, p, s)
+                for entry in index:
+                    rid = entry.get("run_id", "")
+                    if latest_rid is None or rid > latest_rid:
+                        latest_rid = rid
+            return latest_rid
+
     def get(
         self,
         run_id: str,

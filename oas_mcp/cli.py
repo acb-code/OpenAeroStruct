@@ -351,12 +351,24 @@ async def _run_script_async(
     output: str | None = None,
 ) -> None:
     """Execute a list of tool-call dicts in sequence (in-memory state shared)."""
-    from oas_mcp.cli_runner import run_tool, json_dumps
+    from oas_mcp.cli_runner import run_tool, interpolate_args, json_dumps
 
     all_results = []
     for i, step in enumerate(steps):
         tool_name = step.get("tool", "")
         args = step.get("args", {})
+        # Interpolate $prev.run_id and $N.run_id references
+        try:
+            args = interpolate_args(args, all_results)
+        except ValueError as exc:
+            response = {
+                "ok": False,
+                "error": {"code": "USER_INPUT_ERROR", "message": str(exc)},
+            }
+            all_results.append({"step": i, "tool": tool_name, **response})
+            if output is None:
+                print(json_dumps(response, pretty=pretty), flush=True)
+            continue
         response = await run_tool(tool_name, args)
         all_results.append({"step": i, "tool": tool_name, **response})
         # Print each result as it completes for streaming output
@@ -437,6 +449,125 @@ def _write_output(data: Any, path: str, pretty: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Convenience commands
+# ---------------------------------------------------------------------------
+
+
+def _cmd_list_runs(
+    limit: int = 10,
+    analysis_type: str | None = None,
+    pretty: bool = False,
+    output: str | None = None,
+) -> None:
+    """List recent analysis runs."""
+    from oas_mcp.cli_runner import run_tool_sync, json_dumps
+
+    args: dict = {}
+    if analysis_type:
+        args["analysis_type"] = analysis_type
+
+    response = run_tool_sync("list_artifacts", args)
+    if not response.get("ok"):
+        _output_response(response, pretty=pretty, output=output)
+        return
+
+    entries = response.get("result", [])
+    # Sort by run_id (chronological) descending, take latest N
+    entries.sort(key=lambda e: e.get("run_id", ""), reverse=True)
+    entries = entries[:limit]
+
+    # Print a concise table to stdout
+    if output:
+        _write_output(entries, output, pretty)
+    else:
+        if not entries:
+            print("No runs found.")
+            return
+        fmt = "{:<28s}  {:<14s}  {:<20s}  {}"
+        print(fmt.format("RUN_ID", "TYPE", "TOOL", "SURFACES"))
+        print("-" * 80)
+        for e in entries:
+            print(fmt.format(
+                e.get("run_id", "?"),
+                e.get("analysis_type", "?"),
+                e.get("tool_name", "?"),
+                ", ".join(e.get("surfaces", [])),
+            ))
+
+
+def _cmd_show(
+    run_id: str = "latest",
+    pretty: bool = False,
+    output: str | None = None,
+) -> None:
+    """Show summary of a run's results."""
+    from oas_mcp.cli_runner import run_tool_sync, json_dumps
+
+    response = run_tool_sync("get_run", {"run_id": run_id})
+    _output_response(response, pretty=True, output=output)
+
+
+def _cmd_viewer(port: int = 7654, db: str | None = None) -> None:
+    """Start the provenance/dashboard viewer server."""
+    from oas_mcp.provenance.cli import cmd_serve
+    from oas_mcp.provenance.db import init_db
+
+    if db is not None:
+        db_path = Path(db)
+    else:
+        # Use the same default as init_db() — ~/.oas_provenance/sessions.db
+        import os
+        db_path = Path(
+            os.environ.get(
+                "OAS_PROV_DB",
+                Path.home() / ".oas_provenance" / "sessions.db",
+            )
+        )
+
+    if not db_path.exists():
+        print(f"Provenance DB not found at {db_path}", file=sys.stderr)
+        print("Run an analysis first, or pass --db <path>.", file=sys.stderr)
+        sys.exit(1)
+
+    cmd_serve(db_path, port)
+
+
+def _cmd_plot(
+    run_id: str = "latest",
+    plot_type: str = "lift_distribution",
+    out: str | None = None,
+) -> None:
+    """Save a plot PNG to disk."""
+    from oas_mcp.cli_runner import run_tool_sync, json_dumps
+
+    response = run_tool_sync("visualize", {
+        "run_id": run_id,
+        "plot_type": plot_type,
+        "output": "file",
+    })
+
+    if not response.get("ok"):
+        _output_response(response, pretty=True, output=None)
+        return
+
+    result = response.get("result", [])
+    # Extract the file_path from metadata
+    meta = result[0] if isinstance(result, list) and result else result
+    file_path = meta.get("file_path") if isinstance(meta, dict) else None
+
+    if out and file_path:
+        # Move/copy to requested output path
+        import shutil
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file_path, out)
+        print(f"Plot saved to: {out}")
+    elif file_path:
+        print(f"Plot saved to: {file_path}")
+    else:
+        print(json_dumps(response, pretty=True))
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -455,7 +586,8 @@ def main() -> None:
         help="State file namespace for one-shot mode (default: 'default')",
     )
     parser.add_argument(
-        "--output", default=None, metavar="FILE", help="Write output to FILE instead of stdout"
+        "--save-to", default=None, dest="save_to", metavar="FILE",
+        help="Write output to FILE instead of stdout",
     )
 
     subparsers = parser.add_subparsers(dest="mode", metavar="MODE")
@@ -476,6 +608,34 @@ def main() -> None:
     # --- list-tools ---
     subparsers.add_parser("list-tools", help="Print available tool names and exit")
 
+    # --- list-runs ---
+    lr_parser = subparsers.add_parser("list-runs", help="Show recent analysis runs")
+    lr_parser.add_argument("--limit", type=int, default=10, help="Max runs to show (default: 10)")
+    lr_parser.add_argument("--analysis-type", default=None, help="Filter by analysis type")
+
+    # --- show ---
+    show_parser = subparsers.add_parser("show", help="Show summary of a run's results")
+    show_parser.add_argument("run_id", nargs="?", default="latest", help="Run ID (default: latest)")
+
+    # --- plot ---
+    plot_parser = subparsers.add_parser("plot", help="Save a plot to disk (shorthand for visualize)")
+    plot_parser.add_argument("run_id", nargs="?", default="latest", help="Run ID (default: latest)")
+    plot_parser.add_argument("plot_type", help="Plot type (e.g. lift_distribution, drag_polar)")
+    plot_parser.add_argument("-o", "--out", default=None, help="Output file path (default: <run_id>_<plot_type>.png)")
+
+    # --- viewer ---
+    viewer_parser = subparsers.add_parser(
+        "viewer",
+        help="Start the provenance/dashboard viewer server (http://localhost:PORT)",
+    )
+    viewer_parser.add_argument(
+        "--port", type=int, default=7654, help="Port to listen on (default: 7654)",
+    )
+    viewer_parser.add_argument(
+        "--db", default=None, metavar="PATH",
+        help="Path to provenance SQLite file (default: ~/.oas_provenance/sessions.db)",
+    )
+
     # --- Mode 2: one-shot tool subcommands ---
     # Build subcommands lazily when mode is not 'interactive' or 'run-script'
     # to keep startup fast for those modes.
@@ -494,7 +654,7 @@ def main() -> None:
 
     pretty = args.pretty
     workspace = args.workspace
-    output = args.output
+    output = args.save_to
 
     if args.mode == "interactive":
         interactive_mode(pretty=pretty)
@@ -505,6 +665,27 @@ def main() -> None:
     elif args.mode == "list-tools":
         from oas_mcp.cli_runner import list_tools
         print("\n".join(list_tools()))
+
+    elif args.mode == "list-runs":
+        _cmd_list_runs(
+            limit=args.limit,
+            analysis_type=args.analysis_type,
+            pretty=pretty,
+            output=output,
+        )
+
+    elif args.mode == "show":
+        _cmd_show(run_id=args.run_id, pretty=pretty, output=output)
+
+    elif args.mode == "plot":
+        _cmd_plot(
+            run_id=args.run_id,
+            plot_type=args.plot_type,
+            out=args.out,
+        )
+
+    elif args.mode == "viewer":
+        _cmd_viewer(port=args.port, db=args.db)
 
     elif args.mode is None:
         parser.print_help()

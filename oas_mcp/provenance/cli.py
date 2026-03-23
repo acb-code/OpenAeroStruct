@@ -29,7 +29,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 _DEFAULT_DB = Path(
-    os.environ.get("OAS_PROV_DB", "./oas_data/provenance.db")
+    os.environ.get("OAS_PROV_DB", Path.home() / ".oas_provenance" / "sessions.db")
 )
 
 

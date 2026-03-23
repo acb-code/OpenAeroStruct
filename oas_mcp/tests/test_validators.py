@@ -88,9 +88,13 @@ class TestValidateFlightConditions:
         with pytest.raises(ValueError, match="velocity"):
             validate_flight_conditions(-1.0, 5.0, 0.84, 1e6, 0.38)
 
-    def test_zero_mach(self):
+    def test_zero_mach_allowed(self):
+        """Mach=0 is valid for incompressible flow — should NOT raise."""
+        validate_flight_conditions(250.0, 5.0, 0.0, 1e6, 0.38)
+
+    def test_negative_mach(self):
         with pytest.raises(ValueError, match="Mach"):
-            validate_flight_conditions(250.0, 5.0, 0.0, 1e6, 0.38)
+            validate_flight_conditions(250.0, 5.0, -0.1, 1e6, 0.38)
 
     def test_alpha_out_of_range(self):
         with pytest.raises(ValueError, match="alpha"):
