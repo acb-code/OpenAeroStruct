@@ -178,12 +178,15 @@ def _make_fig(run_id: str, title: str) -> tuple:
 
 
 def plot_lift_distribution(run_id: str, results: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
-    """Plot spanwise sectional Cl distribution.
+    """Plot spanwise lift loading distribution with elliptical overlay.
 
-    Looks for ``sectional_data.Cl`` (list of floats) and
-    ``sectional_data.y_span`` (list of floats, normalised span stations).
+    Primary data: ``sectional_data.lift_loading`` — force-per-unit-span
+    normalised by dynamic pressure, matching the ``plot_wing.py`` reference.
+    Also plots the ideal elliptical distribution for comparison.
 
-    Falls back to a bar chart of per-surface CL if sectional data is absent.
+    Falls back to ``Cl`` (sectional lift coefficient) if ``lift_loading``
+    is not available (e.g. older artifacts), and to a per-surface bar chart
+    if no sectional data exists at all.
     """
     _require_mpl()
     import matplotlib.pyplot as plt
@@ -191,47 +194,68 @@ def plot_lift_distribution(run_id: str, results: dict, case_name: str = "", *, s
     title = f"Lift Distribution — {case_name}" if case_name else "Lift Distribution"
     fig, ax = _make_fig(run_id, title)
 
+    # Find sectional data — may be at top level or nested by surface name
     sectional = results.get("sectional_data", {})
-    Cl = sectional.get("Cl")
-    y = sectional.get("y_span_norm")
-
-    # sectional_data is stored keyed by surface name: {"wing": {"Cl": [...], ...}}.
-    # Fall through the nested dict to find the first surface with both arrays.
-    if (Cl is None or y is None) and sectional:
-        for surf_data in sectional.values():
-            if isinstance(surf_data, dict):
-                Cl = surf_data.get("Cl")
-                y = surf_data.get("y_span_norm")
-                if Cl and y:
+    surf_data = None
+    if sectional:
+        # Try top-level keys first
+        if "y_span_norm" in sectional:
+            surf_data = sectional
+        else:
+            # Nested by surface name
+            for sd in sectional.values():
+                if isinstance(sd, dict) and "y_span_norm" in sd:
+                    surf_data = sd
                     break
 
-    if Cl and y and (len(Cl) == len(y) or len(Cl) == len(y) - 1):
-        if len(Cl) == len(y) - 1:
-            # Cl has ny-1 panel values, y has ny node values → use panel midpoints
-            y_plot = [(y[i] + y[i + 1]) / 2.0 for i in range(len(Cl))]
+    if surf_data:
+        y = surf_data.get("y_span_norm")
+        lift = surf_data.get("lift_loading")
+        lift_ell = surf_data.get("lift_elliptical")
+        Cl = surf_data.get("Cl")
+
+        # Prefer lift_loading (matches plot_wing.py); fall back to Cl
+        plot_data = lift if lift else Cl
+        ylabel = "Normalised lift  l(y)/q  [m]" if lift else "Sectional Cl  [—]"
+
+        if plot_data and y and (len(plot_data) == len(y) or len(plot_data) == len(y) - 1):
+            if len(plot_data) == len(y) - 1:
+                y_plot = [(y[i] + y[i + 1]) / 2.0 for i in range(len(plot_data))]
+            else:
+                y_plot = y
+            ax.plot(y_plot, plot_data, "b-o", markersize=3, linewidth=1.5, label="lift")
+
+            # Elliptical overlay (green dashed, matches plot_wing.py)
+            if lift_ell and y and len(lift_ell) == len(y):
+                ax.plot(y, lift_ell, "--", color="g", linewidth=1.5, label="elliptical")
+                ax.legend(fontsize=7)
+
+            ax.set_xlabel("Normalised spanwise station η = 2y/b  [—]   (0 = root, 1 = tip)")
+            ax.set_ylabel(ylabel)
+            ax.set_xlim(0, 1)
+            d_min, d_max = min(plot_data), max(plot_data)
+            ax.set_title(
+                f"[{d_min:.3f}, {d_max:.3f}]", fontsize=8
+            )
         else:
-            y_plot = y
-        ax.plot(y_plot, Cl, "b-o", markersize=3, linewidth=1.5)
-        ax.set_xlabel("Normalised spanwise station η = 2y/b  [—]   (0 = root, 1 = tip)")
-        ax.set_ylabel("Sectional lift coefficient  Cl  [—]")
-        ax.set_xlim(0, 1)
-        cl_min, cl_max = min(Cl), max(Cl)
-        ax.set_title(
-            f"Cl ∈ [{cl_min:.3f}, {cl_max:.3f}]", fontsize=8
-        )
+            _lift_fallback_bar(ax, results)
     else:
-        # Fallback: per-surface bar chart
-        surfaces = results.get("surfaces", {})
-        names = list(surfaces.keys())
-        cls = [surfaces[n].get("CL", 0.0) for n in names]
-        ax.bar(names, cls, color="steelblue", edgecolor="navy", linewidth=0.8)
-        ax.set_xlabel("Surface")
-        ax.set_ylabel("CL  [—]")
-        ax.set_title("Per-surface CL (sectional data not available)", fontsize=8)
+        _lift_fallback_bar(ax, results)
 
     ax.grid(True, alpha=0.3)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     return _fig_to_response(fig, run_id, "lift_distribution", save_dir=save_dir)
+
+
+def _lift_fallback_bar(ax, results: dict):
+    """Draw a per-surface CL bar chart when sectional data is absent."""
+    surfaces = results.get("surfaces", {})
+    names = list(surfaces.keys())
+    cls = [surfaces[n].get("CL", 0.0) for n in names]
+    ax.bar(names, cls, color="steelblue", edgecolor="navy", linewidth=0.8)
+    ax.set_xlabel("Surface")
+    ax.set_ylabel("CL  [—]")
+    ax.set_title("Per-surface CL (sectional data not available)", fontsize=8)
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +404,7 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "", *,
     ax1.legend(fontsize=7)
     ax1.grid(True, alpha=0.3)
 
-    ax2.axhline(1.0, color="red", linewidth=1.0, linestyle="--", label="Failure threshold")
+    ax2.axhline(0.0, color="red", linewidth=1.0, linestyle="--", label="Failure threshold")
     ax2.set_xlabel("Normalised spanwise station η  [—]   (0 = root, 1 = tip)")
     ax2.set_ylabel("Failure index  [—]")
     ax2.set_title("Structural Failure Index", fontsize=8)

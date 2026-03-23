@@ -42,41 +42,69 @@ _PNG_FALLBACK_TYPES = frozenset({
 
 
 def _extract_lift_distribution(results: dict) -> dict:
-    """Extract spanwise Cl data for a Plotly bar/line chart."""
-    sectional = results.get("sectional_data", {})
-    Cl = sectional.get("Cl")
-    y = sectional.get("y_span_norm")
+    """Extract spanwise lift loading data for a Plotly line chart.
 
-    # Nested by surface name
-    if (Cl is None or y is None) and sectional:
-        for surf_data in sectional.values():
-            if isinstance(surf_data, dict):
-                Cl = surf_data.get("Cl")
-                y = surf_data.get("y_span_norm")
-                if Cl and y:
+    Prefers ``lift_loading`` (matches plot_wing.py reference) with elliptical
+    overlay.  Falls back to ``Cl`` for older artifacts, then to per-surface
+    CL bars if no sectional data exists.
+    """
+    sectional = results.get("sectional_data", {})
+
+    # Find sectional data — may be at top level or nested by surface name
+    surf_data = None
+    if sectional:
+        if "y_span_norm" in sectional:
+            surf_data = sectional
+        else:
+            for sd in sectional.values():
+                if isinstance(sd, dict) and "y_span_norm" in sd:
+                    surf_data = sd
                     break
 
-    if Cl and y:
-        if len(Cl) == len(y) - 1:
-            y_plot = [(y[i] + y[i + 1]) / 2.0 for i in range(len(Cl))]
-        else:
-            y_plot = list(y)
-        return {
-            "type": "lift_distribution",
-            "interactive": True,
-            "traces": [
+    if surf_data:
+        y = surf_data.get("y_span_norm")
+        lift = surf_data.get("lift_loading")
+        lift_ell = surf_data.get("lift_elliptical")
+        Cl = surf_data.get("Cl")
+
+        plot_data = lift if lift else Cl
+        ylabel = "Normalised lift  l(y)/q  [m]" if lift else "Sectional Cl  [—]"
+        data_label = "lift" if lift else "Sectional Cl"
+
+        if plot_data and y:
+            if len(plot_data) == len(y) - 1:
+                y_plot = [(y[i] + y[i + 1]) / 2.0 for i in range(len(plot_data))]
+            else:
+                y_plot = list(y)
+
+            traces = [
                 {
-                    "kind": "bar",
+                    "kind": "scatter",
                     "x": list(y_plot),
-                    "y": list(Cl),
-                    "name": "Sectional Cl",
+                    "y": list(plot_data),
+                    "name": data_label,
+                    "mode": "lines+markers",
                     "marker_color": "steelblue",
                 }
-            ],
-            "xaxis": {"title": "Normalised spanwise station η = 2y/b  [—]  (0=root, 1=tip)"},
-            "yaxis": {"title": "Sectional lift coefficient  Cl  [—]"},
-            "title": "Lift Distribution",
-        }
+            ]
+            if lift_ell and y and len(lift_ell) == len(y):
+                traces.append({
+                    "kind": "scatter",
+                    "x": list(y),
+                    "y": list(lift_ell),
+                    "name": "elliptical",
+                    "mode": "lines",
+                    "line": {"color": "green", "dash": "dash"},
+                })
+
+            return {
+                "type": "lift_distribution",
+                "interactive": True,
+                "traces": traces,
+                "xaxis": {"title": "Normalised spanwise station η = 2y/b  [—]  (0=root, 1=tip)"},
+                "yaxis": {"title": ylabel},
+                "title": "Lift Distribution",
+            }
 
     # Fallback: per-surface CL bars
     surfaces = results.get("surfaces", {})
@@ -198,7 +226,7 @@ def _extract_stress_distribution(results: dict) -> dict:
     # Failure threshold reference line
     traces.append({
         "kind": "hline",
-        "y": 1.0,
+        "y": 0.0,
         "name": "Failure threshold",
         "yaxis": "y2",
         "line": {"color": "red", "dash": "dash"},

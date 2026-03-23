@@ -153,6 +153,13 @@ def extract_standard_detail(
     """
     standard: dict = {"sectional_data": {}, "mesh_snapshot": {}}
 
+    # Determine the coupling prefix for aerostruct vs aero-only paths.
+    # Aerostruct: sec_forces at {pt}.coupled.aero_states.{name}_sec_forces
+    # Aero-only:  sec_forces at {pt}.aero_states.{name}_sec_forces
+    coupled_prefix = (
+        f"{point_name}.coupled." if analysis_type == "aerostruct" else f"{point_name}."
+    )
+
     for surface in surfaces:
         name = surface["name"]
         perf = f"{point_name}.{name}_perf"
@@ -160,7 +167,9 @@ def extract_standard_detail(
 
         # Spanwise panel y-stations from mesh (normalised 0→1)
         mesh = surface.get("mesh")
+        ny = None
         if mesh is not None:
+            ny = int(mesh.shape[1])
             y_coords = np.asarray(mesh[0, :, 1]).ravel()
             # OAS symmetric meshes span y ∈ [-b/2, 0] (left half-span), so
             # node 0 is the TIP and node ny-1 is the ROOT.  Using |y|/max(|y|)
@@ -168,16 +177,20 @@ def extract_standard_detail(
             y_abs = np.abs(y_coords)
             span_half = max(float(y_abs.max()), 1e-12)
             y_norm = (y_abs / span_half).tolist()
-            sect["y_span_norm"] = y_norm
+            # Sort ascending so η goes 0 (root) → 1 (tip) for plotting.
+            # The original OAS ordering is tip-first (descending); reverse it.
+            y_norm_sorted = sorted(y_norm)
+            sect["y_span_norm"] = y_norm_sorted
 
-            # Mesh snapshot: leading/trailing edge for planform plot
+            # Mesh snapshot: full mesh for 3D wireframe + LE/TE for 2D fallback
             le = np.asarray(mesh[0, :, :]).tolist()
             te = np.asarray(mesh[-1, :, :]).tolist()
             standard["mesh_snapshot"][name] = {
                 "leading_edge": le,
                 "trailing_edge": te,
+                "mesh": np.asarray(mesh).tolist(),
                 "nx": int(mesh.shape[0]),
-                "ny": int(mesh.shape[1]),
+                "ny": ny,
             }
 
         # Sectional CL (panel-level) — path varies by OAS version
@@ -189,10 +202,56 @@ def extract_standard_detail(
             if cl_val is not None:
                 cl_arr = np.asarray(cl_val).ravel()
                 if len(cl_arr) > 1:
-                    sect["Cl"] = cl_arr.tolist()
+                    # Reverse to match sorted y_span_norm (root→tip order)
+                    sect["Cl"] = cl_arr[::-1].tolist()
                 break
 
+        # -------------------------------------------------------------------
+        # Lift loading & elliptical overlay (matches plot_wing.py logic)
+        # -------------------------------------------------------------------
+        sf_path = f"{coupled_prefix}aero_states.{name}_sec_forces"
+        w_path = f"{coupled_prefix}{name}.widths"
+        sec_forces_val = _try_get(prob, sf_path)
+        widths_val = _try_get(prob, w_path)
+
+        if sec_forces_val is not None and widths_val is not None and mesh is not None:
+            sec_forces = np.asarray(sec_forces_val)
+            widths = np.asarray(widths_val).ravel()
+            alpha_deg = _scalar(prob.get_val("alpha"))
+            alpha_rad = alpha_deg * np.pi / 180.0
+            cosa = np.cos(alpha_rad)
+            sina = np.sin(alpha_rad)
+            rho = _scalar(prob.get_val("rho"))
+            v = _scalar(prob.get_val("v"))
+
+            # Sum chordwise forces, compute lift loading (force/span / q)
+            # This matches plot_wing.py: lift = (-Fx*sin(α) + Fz*cos(α)) / widths / (0.5*ρ*V²)
+            forces = np.sum(sec_forces, axis=0)  # (ny-1, 3)
+            lift_loading = (
+                (-forces[:, 0] * sina + forces[:, 2] * cosa)
+                / widths / 0.5 / rho / v**2
+            )
+            # Reverse to match sorted y_span_norm (root→tip)
+            sect["lift_loading"] = lift_loading[::-1].tolist()
+
+            # Elliptical overlay for half-span display.
+            # y_span_norm (sorted) goes from η=0 (root) to η=1 (tip).
+            # The ideal elliptical distribution is l(η) = l_0 * sqrt(1 - η²),
+            # which peaks at the root (η=0) and drops to zero at the tip (η=1).
+            eta = np.array(y_norm_sorted)  # [0, ..., 1] root→tip
+            # Element midpoints for lift loading (same as panel midpoints)
+            eta_mid = (eta[:-1] + eta[1:]) / 2.0
+            lift_sorted = np.array(sect["lift_loading"])  # root→tip order
+            lift_area_half = float(np.sum(lift_sorted * (eta[1:] - eta[:-1])))
+            # l_0 = 4 * A_half / π  (integral of l_0*sqrt(1-η²) from 0 to 1 = l_0*π/4)
+            lift_ell = (4 * lift_area_half / np.pi) * np.sqrt(
+                np.clip(1 - eta**2, 0, None)
+            )
+            sect["lift_elliptical"] = lift_ell.tolist()
+
+        # -------------------------------------------------------------------
         # Spanwise von Mises stress (aerostruct only)
+        # -------------------------------------------------------------------
         if analysis_type == "aerostruct":
             vm_path = f"{perf}.vonmises"
             vm_val = _try_get(prob, vm_path)
@@ -205,7 +264,8 @@ def extract_standard_detail(
                 else:
                     vm_per_elem = vm_2d.ravel()
                 if len(vm_per_elem) > 1:
-                    sect["vonmises_MPa"] = (vm_per_elem / 1e6).tolist()
+                    # Reverse to match sorted y_span_norm (root→tip)
+                    sect["vonmises_MPa"] = (vm_per_elem[::-1] / 1e6).tolist()
 
             # Failure index distribution (per element)
             fi_path = f"{perf}.failure"
@@ -213,7 +273,7 @@ def extract_standard_detail(
             if fi_val is not None:
                 fi_arr = np.asarray(fi_val).ravel()
                 if len(fi_arr) > 1:
-                    sect["failure_index"] = fi_arr.tolist()
+                    sect["failure_index"] = fi_arr[::-1].tolist()
                 elif "vonmises_MPa" in sect:
                     # FailureKS returns a scalar; derive per-element failure index
                     # from vonmises: failure_i = vm / sigma_allow - 1
@@ -222,6 +282,14 @@ def extract_standard_detail(
                     sigma_allow = yield_stress / safety_factor
                     vm_pa = np.array(sect["vonmises_MPa"]) * 1e6
                     sect["failure_index"] = (vm_pa / sigma_allow - 1.0).tolist()
+
+            # Deformed mesh for 3D overlay (aerostruct only)
+            def_mesh_path = f"{point_name}.coupled.{name}.def_mesh"
+            def_mesh_val = _try_get(prob, def_mesh_path)
+            if def_mesh_val is not None and name in standard["mesh_snapshot"]:
+                standard["mesh_snapshot"][name]["def_mesh"] = (
+                    np.asarray(def_mesh_val).tolist()
+                )
 
         standard["sectional_data"][name] = sect
 
