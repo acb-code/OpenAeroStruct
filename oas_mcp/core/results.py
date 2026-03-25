@@ -139,10 +139,31 @@ def extract_aerostruct_results(
             surf_res["structural_mass_kg"] = sm_val
             total_struct_mass += sm_val
 
+        # Per-surface CG location (from SpatialBeamSetup, model-level)
+        cg_loc = _try_get(prob, f"{name}.cg_location")
+        if cg_loc is not None:
+            surf_res["cg_location"] = [round(float(x), 6) for x in np.asarray(cg_loc).ravel()]
+
+        # Tip deflection — node 0 = tip for symmetric mesh, z is column 2
+        disp_val = _try_get(prob, f"{point_name}.coupled.{name}.disp")
+        if disp_val is not None:
+            disp_arr = np.asarray(disp_val)  # (ny, 6)
+            surf_res["tip_deflection_m"] = round(float(disp_arr[0, 2]), 6)
+
+        # Total fuel volume (wingbox with distributed_fuel_weight)
+        fv = _try_get(prob, f"{name}.struct_setup.fuel_vols")
+        if fv is not None:
+            surf_res["total_fuel_volume_m3"] = round(float(np.asarray(fv).ravel().sum()), 6)
+
         results["surfaces"][name] = surf_res
 
     if total_struct_mass > 0:
         results["structural_mass"] = total_struct_mass
+
+    # Aircraft CG (promoted from total_perf.CG)
+    cg_val = _try_get(prob, f"{point_name}.cg")
+    if cg_val is not None:
+        results["cg"] = [round(float(x), 6) for x in np.asarray(cg_val).ravel()]
 
     return results
 
@@ -325,6 +346,26 @@ def extract_standard_detail(
                 standard["mesh_snapshot"][name]["def_mesh"] = (
                     np.asarray(def_mesh_val).tolist()
                 )
+
+            # Z-deflection distribution (vertical displacement per span node)
+            disp_val = _try_get(prob, f"{point_name}.coupled.{name}.disp")
+            if disp_val is not None:
+                z_defl = np.asarray(disp_val)[:, 2]  # (ny,) vertical
+                sect["deflection_m"] = [round(float(v), 6) for v in z_defl[::-1]]
+
+            # Element mass distribution (from geometry group, model-level)
+            em_val = _try_get(prob, f"{name}.element_mass")
+            if em_val is not None:
+                em_arr = np.asarray(em_val).ravel()
+                if len(em_arr) > 1:
+                    sect["element_mass_kg"] = [round(float(v), 6) for v in em_arr[::-1]]
+
+            # Fuel volume distribution (wingbox only)
+            fv_val = _try_get(prob, f"{name}.struct_setup.fuel_vols")
+            if fv_val is not None:
+                fv_arr = np.asarray(fv_val).ravel()
+                if len(fv_arr) > 1:
+                    sect["fuel_vols_m3"] = [round(float(v), 6) for v in fv_arr[::-1]]
 
         standard["sectional_data"][name] = sect
 

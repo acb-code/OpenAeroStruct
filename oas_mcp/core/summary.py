@@ -70,6 +70,29 @@ def _drag_breakdown(surf_results: dict) -> dict:
     }
 
 
+def _deflection_metrics(
+    results: dict, standard_detail: dict | None, surface_name: str
+) -> dict:
+    """Extract tip deflection metrics from results."""
+    metrics: dict[str, Any] = {}
+    surf = results.get("surfaces", {}).get(surface_name, {})
+    tip_defl = surf.get("tip_deflection_m")
+    if tip_defl is not None:
+        metrics["tip_deflection_m"] = round(tip_defl, 4)
+        # Compute as % of semi-span from mesh snapshot
+        if standard_detail:
+            snap = standard_detail.get("mesh_snapshot", {}).get(surface_name, {})
+            le = snap.get("leading_edge")
+            if le and len(le) >= 2:
+                y_coords = [pt[1] for pt in le]
+                semi_span = max(abs(y_coords[0]), abs(y_coords[-1]))
+                if semi_span > 0.01:
+                    metrics["tip_deflection_pct_span"] = round(
+                        100.0 * abs(tip_defl) / semi_span, 2
+                    )
+    return metrics
+
+
 def _weight_balance(lew: float | None) -> str:
     """Classify L=W residual."""
     if lew is None:
@@ -123,6 +146,9 @@ def _classify_flags(results: dict, derived: dict, analysis_type: str) -> list[st
             flags.append("lift_deficit")
         elif wb == "lift_surplus":
             flags.append("lift_surplus")
+        pct_span = derived.get("tip_deflection_pct_span")
+        if pct_span is not None and pct_span > 15.0:
+            flags.append("high_deflection")
     return flags
 
 
@@ -178,6 +204,14 @@ def _narrative_aerostruct(results: dict, derived: dict, context: dict) -> str:
             parts.append(
                 f"Structure is safe with {margin:.0f}% margin (failure={failure:.3f})."
             )
+    tip_defl = derived.get("tip_deflection_m")
+    pct_span = derived.get("tip_deflection_pct_span")
+    if tip_defl is not None:
+        direction = "upward" if tip_defl > 0 else "downward"
+        defl_str = f"Tip deflects {abs(tip_defl):.3f} m {direction}"
+        if pct_span is not None:
+            defl_str += f" ({pct_span:.1f}% of semi-span)"
+        parts.append(defl_str + ".")
     wb = derived.get("weight_balance")
     if wb == "trimmed":
         parts.append("Wing is trimmed (L≈W).")
@@ -280,7 +314,15 @@ def summarize_aerostruct(
         failure = surf.get("failure")
         if failure is not None:
             derived["structural_margin_pct"] = round((1.0 - float(failure)) * 100.0, 1)
+        derived.update(_deflection_metrics(results, standard_detail, surf_name))
+        fv = surf.get("total_fuel_volume_m3")
+        if fv is not None:
+            derived["total_fuel_volume_m3"] = fv
         break
+    # Aircraft CG x-location
+    cg = results.get("cg")
+    if cg is not None and len(cg) >= 1:
+        derived["cg_x_m"] = round(float(cg[0]), 4)
     derived["weight_balance"] = _weight_balance(results.get("L_equals_W"))
     struct_mass = results.get("structural_mass")
     W0 = context.get("W0")

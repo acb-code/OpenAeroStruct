@@ -218,6 +218,32 @@ class TestStructuralPhysicsInvariants:
         )
 
     @pytest.mark.asyncio
+    async def test_cg_is_plausible(self):
+        """Aircraft CG x-coordinate should be positive and within chord range."""
+        from oas_mcp.server import run_aerostruct_analysis
+        await _make_struct_wing()
+        r = _r(await run_aerostruct_analysis(["wing"], alpha=5.0))
+        cg = r.get("cg")
+        assert cg is not None, "cg should be present in aerostruct results"
+        assert len(cg) == 3, "cg should be a 3-element vector [x, y, z]"
+        # For a wing with root_chord=1.0, CG x should be within a reasonable range
+        assert cg[0] > -10.0 and cg[0] < 100.0, (
+            f"CG x={cg[0]} seems implausible for this geometry"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tip_deflection_upward_under_lift(self):
+        """For a loaded wing at positive alpha, tip should deflect upward (positive z)."""
+        from oas_mcp.server import run_aerostruct_analysis
+        await _make_struct_wing()
+        r = _r(await run_aerostruct_analysis(["wing"], alpha=5.0))
+        tip_defl = r["surfaces"]["wing"].get("tip_deflection_m")
+        assert tip_defl is not None, "tip_deflection_m should be present"
+        assert tip_defl > 0, (
+            f"Tip deflection={tip_defl:.6f} should be positive (upward) under lift"
+        )
+
+    @pytest.mark.asyncio
     async def test_higher_alpha_increases_failure(self):
         """Higher angle of attack → larger aerodynamic loads → higher failure index.
 

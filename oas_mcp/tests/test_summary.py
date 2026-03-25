@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from oas_mcp.core.summary import (
     _compute_delta,
+    _deflection_metrics,
     _drag_breakdown,
     _sectional_metrics,
     _weight_balance,
@@ -174,8 +175,17 @@ class TestSummarizeAero:
 
 
 class TestSummarizeAerostruct:
-    def _make_results(self, failure=0.3, lew=0.0, struct_mass=500.0):
-        return {
+    def _make_results(self, failure=0.3, lew=0.0, struct_mass=500.0,
+                      tip_deflection=0.15, cg=None, fuel_vol=None):
+        surf = {
+            "CL": 0.5, "CDi": 0.018, "CDv": 0.007, "CDw": 0.0,
+            "failure": failure, "max_vonmises_Pa": 120e6,
+        }
+        if tip_deflection is not None:
+            surf["tip_deflection_m"] = tip_deflection
+        if fuel_vol is not None:
+            surf["total_fuel_volume_m3"] = fuel_vol
+        results = {
             "CL": 0.5,
             "CD": 0.025,
             "CM": -0.05,
@@ -183,10 +193,21 @@ class TestSummarizeAerostruct:
             "L_equals_W": lew,
             "structural_mass": struct_mass,
             "fuelburn": 5000.0,
-            "surfaces": {
+            "surfaces": {"wing": surf},
+        }
+        if cg is not None:
+            results["cg"] = cg
+        return results
+
+    def _make_standard_detail(self, semi_span=5.0):
+        """Standard detail with mesh snapshot for deflection % span calc."""
+        return {
+            "sectional_data": {"wing": {"Cl": [0.3, 0.35, 0.4]}},
+            "mesh_snapshot": {
                 "wing": {
-                    "CL": 0.5, "CDi": 0.018, "CDv": 0.007, "CDw": 0.0,
-                    "failure": failure, "max_vonmises_Pa": 120e6,
+                    "leading_edge": [[-5.0, -semi_span, 0.0], [0.0, 0.0, 0.0]],
+                    "trailing_edge": [[-5.0, -semi_span, 0.0], [1.0, 0.0, 0.0]],
+                    "nx": 2, "ny": 2,
                 }
             },
         }
@@ -225,6 +246,94 @@ class TestSummarizeAerostruct:
         )
         assert "structural_mass_fraction_pct" in summary["derived_metrics"]
         assert summary["derived_metrics"]["structural_mass_fraction_pct"] == pytest.approx(5.0)
+
+    def test_tip_deflection_in_derived(self):
+        sd = self._make_standard_detail(semi_span=5.0)
+        summary = summarize_aerostruct(
+            self._make_results(tip_deflection=0.15), standard_detail=sd, context={"alpha": 5.0}
+        )
+        assert summary["derived_metrics"]["tip_deflection_m"] == pytest.approx(0.15, abs=0.01)
+        assert summary["derived_metrics"]["tip_deflection_pct_span"] == pytest.approx(3.0, abs=0.1)
+
+    def test_deflection_narrative(self):
+        sd = self._make_standard_detail()
+        summary = summarize_aerostruct(
+            self._make_results(tip_deflection=0.15), standard_detail=sd, context={"alpha": 5.0}
+        )
+        assert "deflects" in summary["narrative"]
+        assert "upward" in summary["narrative"]
+
+    def test_downward_deflection_narrative(self):
+        sd = self._make_standard_detail()
+        summary = summarize_aerostruct(
+            self._make_results(tip_deflection=-0.1), standard_detail=sd, context={"alpha": 5.0}
+        )
+        assert "downward" in summary["narrative"]
+
+    def test_high_deflection_flag(self):
+        sd = self._make_standard_detail(semi_span=5.0)
+        # 1.0m out of 5.0m = 20% > 15% threshold
+        summary = summarize_aerostruct(
+            self._make_results(tip_deflection=1.0), standard_detail=sd, context={"alpha": 5.0}
+        )
+        assert "high_deflection" in summary["flags"]
+
+    def test_no_high_deflection_flag_below_threshold(self):
+        sd = self._make_standard_detail(semi_span=5.0)
+        # 0.15m out of 5.0m = 3% < 15%
+        summary = summarize_aerostruct(
+            self._make_results(tip_deflection=0.15), standard_detail=sd, context={"alpha": 5.0}
+        )
+        assert "high_deflection" not in summary["flags"]
+
+    def test_cg_x_in_derived(self):
+        summary = summarize_aerostruct(
+            self._make_results(cg=[10.5, 0.0, 0.5]), context={"alpha": 5.0}
+        )
+        assert summary["derived_metrics"]["cg_x_m"] == pytest.approx(10.5)
+
+    def test_no_cg_when_absent(self):
+        summary = summarize_aerostruct(
+            self._make_results(cg=None), context={"alpha": 5.0}
+        )
+        assert "cg_x_m" not in summary["derived_metrics"]
+
+    def test_fuel_volume_in_derived(self):
+        summary = summarize_aerostruct(
+            self._make_results(fuel_vol=0.05), context={"alpha": 5.0}
+        )
+        assert summary["derived_metrics"]["total_fuel_volume_m3"] == pytest.approx(0.05)
+
+    def test_no_tip_deflection_when_absent(self):
+        summary = summarize_aerostruct(
+            self._make_results(tip_deflection=None), context={"alpha": 5.0}
+        )
+        assert "tip_deflection_m" not in summary["derived_metrics"]
+        assert "deflects" not in summary["narrative"]
+
+
+class TestDeflectionMetrics:
+    def test_basic_deflection(self):
+        results = {"surfaces": {"wing": {"tip_deflection_m": 0.2}}}
+        sd = {
+            "mesh_snapshot": {
+                "wing": {"leading_edge": [[0, -5, 0], [0, 0, 0]]}
+            }
+        }
+        m = _deflection_metrics(results, sd, "wing")
+        assert m["tip_deflection_m"] == pytest.approx(0.2, abs=0.01)
+        assert m["tip_deflection_pct_span"] == pytest.approx(4.0, abs=0.1)
+
+    def test_no_deflection_returns_empty(self):
+        results = {"surfaces": {"wing": {}}}
+        m = _deflection_metrics(results, None, "wing")
+        assert m == {}
+
+    def test_no_mesh_skips_pct_span(self):
+        results = {"surfaces": {"wing": {"tip_deflection_m": 0.1}}}
+        m = _deflection_metrics(results, None, "wing")
+        assert "tip_deflection_m" in m
+        assert "tip_deflection_pct_span" not in m
 
 
 class TestSummarizeDragPolar:
