@@ -110,3 +110,83 @@ class TestSessionManager:
         mgr.get("default").add_surface(_make_surface())
         mgr.reset()
         assert len(mgr.get("default").surfaces) == 0
+
+
+# ---------------------------------------------------------------------------
+# Cache pinning (unit level — no OAS computation)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionPinning:
+    def test_pin_adds_to_pinned_by(self):
+        session = Session()
+        session.add_surface(_make_surface())
+        from oas_mcp.core.session import _CachedProblem, _surface_fingerprint
+        fp = _surface_fingerprint(session.surfaces["wing"])
+        session._cache["aero:wing"] = _CachedProblem(
+            prob=object(), analysis_type="aero",
+            surface_fingerprints={"wing": fp},
+        )
+        result = session.pin_run("run-1", ["wing"], "aero")
+        assert result is True
+        assert "run-1" in session._cache["aero:wing"].pinned_by
+
+    def test_unpin_removes_from_pinned_by(self):
+        session = Session()
+        session.add_surface(_make_surface())
+        from oas_mcp.core.session import _CachedProblem, _surface_fingerprint
+        fp = _surface_fingerprint(session.surfaces["wing"])
+        session._cache["aero:wing"] = _CachedProblem(
+            prob=object(), analysis_type="aero",
+            surface_fingerprints={"wing": fp},
+        )
+        session.pin_run("run-1", ["wing"], "aero")
+        result = session.unpin_run("run-1")
+        assert result is True
+        assert "run-1" not in session._cache["aero:wing"].pinned_by
+
+    def test_is_pinned_returns_true(self):
+        session = Session()
+        session.add_surface(_make_surface())
+        from oas_mcp.core.session import _CachedProblem, _surface_fingerprint
+        fp = _surface_fingerprint(session.surfaces["wing"])
+        session._cache["aero:wing"] = _CachedProblem(
+            prob=object(), analysis_type="aero",
+            surface_fingerprints={"wing": fp},
+        )
+        session.pin_run("run-1", ["wing"], "aero")
+        assert session.is_pinned("run-1") is True
+        assert session.is_pinned("run-2") is False
+
+    def test_pinned_prevents_cache_eviction(self):
+        """A pinned problem should survive add_surface with a new fingerprint."""
+        session = Session()
+        session.add_surface(_make_surface())
+        from oas_mcp.core.session import _CachedProblem, _surface_fingerprint
+        fp = _surface_fingerprint(session.surfaces["wing"])
+        session._cache["aero:wing"] = _CachedProblem(
+            prob=object(), analysis_type="aero",
+            surface_fingerprints={"wing": fp},
+        )
+        session.pin_run("run-1", ["wing"], "aero")
+
+        # Re-add surface with different span — should NOT evict pinned cache
+        session.add_surface(_make_surface(span=20.0))
+        assert "aero:wing" in session._cache
+
+
+# ---------------------------------------------------------------------------
+# Session configure (unit level)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionConfigure:
+    def test_configure_sets_detail_level(self):
+        session = Session()
+        session.configure(default_detail_level="standard")
+        assert session.defaults.default_detail_level == "standard"
+
+    def test_configure_sets_project(self):
+        session = Session()
+        session.configure(project="my_project")
+        assert session.project == "my_project"

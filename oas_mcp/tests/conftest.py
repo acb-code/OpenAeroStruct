@@ -47,6 +47,30 @@ SMALL_RECT_WINGBOX = dict(
     mrho=2.78e3,
 )
 
+# Tail surface for multi-surface tests — positioned behind and above the wing.
+SMALL_TAIL = dict(
+    name="tail",
+    wing_type="rect",
+    span=4.0,
+    root_chord=0.8,
+    num_x=2,
+    num_y=5,
+    symmetry=True,
+    with_viscous=True,
+    offset=[5.0, 0.0, 0.5],
+)
+
+SMALL_TAIL_STRUCT = dict(
+    **SMALL_TAIL,
+    fem_model_type="tube",
+    E=70.0e9,
+    G=30.0e9,
+    yield_stress=500.0e6,
+    safety_factor=2.5,
+    mrho=3.0e3,
+    thickness_cp=[0.03, 0.05, 0.03],
+)
+
 
 @pytest.fixture(autouse=True)
 def isolate_artifacts(tmp_path):
@@ -96,3 +120,19 @@ async def wingbox_wing():
     """Create a small wing with wingbox structural properties."""
     await create_surface(**SMALL_RECT_WINGBOX)
     return "wing"
+
+
+@pytest_asyncio.fixture
+async def wing_and_tail():
+    """Create wing + tail aero-only surfaces for multi-surface tests."""
+    await create_surface(**SMALL_RECT)
+    await create_surface(**SMALL_TAIL)
+    return ["wing", "tail"]
+
+
+@pytest_asyncio.fixture
+async def wing_and_tail_struct():
+    """Create wing + tail with tube structural properties."""
+    await create_surface(**SMALL_RECT_STRUCT)
+    await create_surface(**SMALL_TAIL_STRUCT)
+    return ["wing", "tail"]

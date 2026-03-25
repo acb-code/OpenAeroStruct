@@ -599,3 +599,63 @@ class TestReset:
 
         r2 = await reset(session_id="default")
         assert r2["cleared"] == "default"
+
+
+# ---------------------------------------------------------------------------
+# Common-mistake regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestCommonMistakeRegressions:
+    """Regression tests for common user errors that should produce clear messages."""
+
+    async def test_failure_constraint_on_aero_only(self, aero_wing):
+        """'failure' constraint requires structural analysis — should raise."""
+        with pytest.raises((ValueError, KeyError)):
+            await run_optimization(
+                surfaces=["wing"],
+                analysis_type="aero",
+                objective="CL",
+                design_variables=[{"name": "alpha", "lower": -5.0, "upper": 15.0}],
+                constraints=[{"name": "failure", "upper": 0.0}],
+            )
+
+    async def test_thickness_intersects_on_wingbox(self, wingbox_wing):
+        """thickness_intersects is tube-only — should raise on wingbox surface."""
+        with pytest.raises(ValueError, match="thickness_intersects|tube|wingbox"):
+            await run_optimization(
+                surfaces=["wing"],
+                analysis_type="aerostruct",
+                objective="structural_mass",
+                design_variables=[
+                    {"name": "spar_thickness", "lower": 0.001, "upper": 0.05},
+                ],
+                constraints=[
+                    {"name": "L_equals_W", "equals": 1.0},
+                    {"name": "thickness_intersects", "upper": 0.0},
+                ],
+            )
+
+    async def test_even_num_y_raises(self):
+        """num_y must be odd — even values should raise."""
+        with pytest.raises(ValueError, match="odd"):
+            from oas_mcp.server import create_surface as cs
+            await cs(
+                name="bad", wing_type="rect", span=10.0,
+                root_chord=1.0, num_x=2, num_y=6,
+            )
+
+    async def test_multipoint_requires_flight_points(self, wingbox_wing):
+        """Multipoint optimization needs flight_points list — should fail without it."""
+        with pytest.raises((ValueError, TypeError, IndexError)):
+            await run_optimization(
+                surfaces=["wing"],
+                analysis_type="aerostruct",
+                objective="fuelburn",
+                design_variables=[{"name": "twist", "lower": -5.0, "upper": 10.0}],
+                constraints=[{"name": "L_equals_W", "equals": 0.0}],
+                CT=0.53 / 3600,
+                R=14307000.0,
+                W0_without_point_masses=50000.0,
+                flight_points=[],  # empty should raise
+            )
