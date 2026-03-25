@@ -23,10 +23,14 @@ class TestRedact:
         assert isinstance(result["mesh"], dict)
         assert result["CL"] == 0.5
 
-    def test_long_list_is_truncated(self):
+    def test_long_list_is_summarized(self):
         obj = list(range(25))
         result = redact(obj)
-        assert "25 items" in str(result)
+        assert isinstance(result, dict)
+        assert result["type"] == "list"
+        assert result["length"] == 25
+        assert result["first"] == 0
+        assert result["last"] == 24
 
     def test_short_list_passes_through(self):
         obj = [1, 2, 3]

@@ -146,7 +146,12 @@ def redact(obj: Any, max_depth: int = 4) -> Any:
         return {k: redact(v, max_depth - 1) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         if len(obj) > 20:
-            return f"[list of {len(obj)} items]"
+            return {
+                "type": "list",
+                "length": len(obj),
+                "first": redact(obj[0], max_depth - 1),
+                "last": redact(obj[-1], max_depth - 1),
+            }
         return [redact(v, max_depth - 1) for v in obj]
     return obj
 

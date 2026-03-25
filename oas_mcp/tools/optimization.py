@@ -68,6 +68,7 @@ async def run_optimization(
     objective_scaler: Annotated[float, "Scaler applied to the objective in add_objective (e.g. 1e4 for CD, 1e-5 for fuelburn)"] = 1.0,
     tolerance: Annotated[float, "Optimiser convergence tolerance"] = 1e-6,
     max_iterations: Annotated[int, "Maximum optimiser iterations"] = 200,
+    capture_solver_iters: Annotated[bool, "Capture nonlinear solver sub-iteration residuals (aerostruct only)"] = False,
     session_id: Annotated[str, "Session identifier"] = "default",
     run_name: Annotated[str | None, "Optional label for this run (stored in artifact metadata)"] = None,
 ) -> dict:
@@ -116,8 +117,8 @@ async def run_optimization(
     ct_val = CT if CT is not None else ct_default
 
     def _run():
-        from ..core.builders import resolve_dv_paths, resolve_objective_path
-        from ..core.convergence import OptimizationTracker
+        from ..core.builders import resolve_constraint_paths, resolve_dv_paths, resolve_objective_path
+        from ..core.convergence import OptimizationTracker, summarize_convergence_history
 
         primary_name = surface_dicts[0]["name"] if surface_dicts else "wing"
 
@@ -144,16 +145,29 @@ async def run_optimization(
             dv_path_map = resolve_dv_paths(
                 design_variables, primary_name, point_names[0], "aerostruct",
             )
+            con_path_map = resolve_constraint_paths(
+                constraints, primary_name, point_names[0], "aerostruct",
+            )
 
             tracker = OptimizationTracker()
             initial_dvs = tracker.record_initial(prob, dv_path_map)
             tracker.attach(prob)
+            if capture_solver_iters:
+                tracker.attach_solver(prob, f"{point_names[0]}.coupled")
 
             obj_path = resolve_objective_path(objective, primary_name, point_names[0], "aerostruct")
 
             prob.run_driver()
             success = prob.driver.result.success if hasattr(prob.driver, "result") else True
-            opt_history = tracker.extract(dv_path_map, obj_path)
+            opt_history = tracker.extract(dv_path_map, obj_path, constraint_path_map=con_path_map)
+
+            # Final gradient norm (if available)
+            try:
+                dr = prob.driver.result
+                if hasattr(dr, "optimality"):
+                    opt_history["final_gradient_norm"] = float(dr.optimality)
+            except Exception:
+                pass
 
             # Per-point roles
             if len(point_names) == 2:
@@ -206,16 +220,29 @@ async def run_optimization(
             dv_path_map = resolve_dv_paths(
                 design_variables, primary_name, point_name, analysis_type,
             )
+            con_path_map = resolve_constraint_paths(
+                constraints, primary_name, point_name, analysis_type,
+            )
 
             tracker = OptimizationTracker()
             initial_dvs = tracker.record_initial(prob, dv_path_map)
             tracker.attach(prob)
+            if capture_solver_iters and analysis_type == "aerostruct":
+                tracker.attach_solver(prob, f"{point_name}.coupled")
 
             obj_path = resolve_objective_path(objective, primary_name, point_name, analysis_type)
 
             prob.run_driver()
             success = prob.driver.result.success if hasattr(prob.driver, "result") else True
-            opt_history = tracker.extract(dv_path_map, obj_path)
+            opt_history = tracker.extract(dv_path_map, obj_path, constraint_path_map=con_path_map)
+
+            # Final gradient norm (if available)
+            try:
+                dr = prob.driver.result
+                if hasattr(dr, "optimality"):
+                    opt_history["final_gradient_norm"] = float(dr.optimality)
+            except Exception:
+                pass
 
             if analysis_type == "aero":
                 final_results = extract_aero_results(prob, surface_dicts, point_name)
@@ -246,19 +273,23 @@ async def run_optimization(
                     _from_oas_order(np.array(v)).tolist() for v in iters
                 ]
 
+        full_history = {"initial_dvs": initial_dvs, **opt_history}
+        summary_history = summarize_convergence_history(full_history)
+
         result = {
             "success": bool(success),
             "optimized_design_variables": dv_results,
             "final_results": final_results,
-            "optimization_history": {"initial_dvs": initial_dvs, **opt_history},
+            "optimization_history": summary_history,
         }
-        return result, standard
+        return result, standard, full_history
 
     run_id = _make_run_id()
     t0 = time.perf_counter()
-    result, standard_detail = await asyncio.to_thread(_suppress_output, _run)
+    result, standard_detail, full_convergence = await asyncio.to_thread(_suppress_output, _run)
 
     session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
+    session.store_convergence(run_id, full_convergence)
 
     inputs: dict = {
         "analysis_type": analysis_type, "objective": objective,

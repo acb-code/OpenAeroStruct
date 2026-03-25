@@ -440,6 +440,26 @@ def resolve_dv_paths(
     return result
 
 
+def resolve_constraint_paths(
+    constraints: list[dict | str],
+    surface_name: str,
+    point_name: str,
+    analysis_type: str = "aero",
+) -> dict[str, str]:
+    """Return ``{constraint_user_name: om_path}`` for each constraint."""
+    result: dict[str, str] = {}
+    for con in constraints:
+        con_name = con["name"] if isinstance(con, dict) else con
+        path = make_om_path(
+            PathKind.CONSTRAINT, con_name,
+            surface_name=surface_name,
+            point_name=point_name,
+            analysis_type=analysis_type,
+        )
+        result[con_name] = path
+    return result
+
+
 def resolve_objective_path(
     objective: str,
     surface_name: str,

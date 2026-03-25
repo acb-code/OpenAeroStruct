@@ -196,6 +196,11 @@ class TestCpOrdering:
         assert all(isinstance(v, float) for v in twist_out)
         # initial_dvs must also be present
         assert r["optimization_history"]["initial_dvs"].get("twist") is not None
+        # constraint_history must be present with CL constraint
+        con_hist = r["optimization_history"].get("constraint_history", {})
+        assert "CL" in con_hist, "constraint_history should include CL"
+        assert len(con_hist["CL"]) > 0, "CL constraint history should have entries"
+        assert all(isinstance(v, float) for v in con_hist["CL"])
 
 
 # ---------------------------------------------------------------------------

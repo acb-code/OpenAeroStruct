@@ -635,6 +635,23 @@ def plot_opt_history(run_id: str, optimization_history: dict, case_name: str = "
                 bbox={"facecolor": "lightyellow", "alpha": 0.8, "edgecolor": "gray"})
         ax.axis("off")
 
+    # Constraint traces on secondary y-axis (if available)
+    constraint_history = optimization_history.get("constraint_history", {})
+    if constraint_history and obj_vals and len(obj_vals) > 1:
+        ax2 = ax.twinx()
+        _CON_COLORS = {"failure": "red", "CL": "steelblue", "L_equals_W": "green", "CD": "orange", "CM": "purple"}
+        _CON_REFS = {"failure": 1.0, "L_equals_W": 0.0}
+        for con_name, con_vals in constraint_history.items():
+            color = _CON_COLORS.get(con_name, "gray")
+            citers = list(range(len(con_vals)))
+            ax2.plot(citers, con_vals, "--", linewidth=1.2, color=color,
+                     label=con_name, alpha=0.7)
+            if con_name in _CON_REFS:
+                ax2.axhline(_CON_REFS[con_name], color=color, linewidth=0.6,
+                            linestyle=":", alpha=0.5)
+        ax2.set_ylabel("Constraint value  [—]", fontsize=8)
+        ax2.legend(fontsize=6, loc="center right")
+
     ax.grid(True, alpha=0.3)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     return _fig_to_response(fig, run_id, "opt_history", save_dir=save_dir)
