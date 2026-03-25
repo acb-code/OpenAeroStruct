@@ -24,11 +24,31 @@ from ..core.validation import (
 )
 from ..core.validators import (
     validate_flight_conditions,
+    validate_ground_effect_compat,
+    validate_height_agl,
+    validate_omega,
     validate_struct_props_present,
     validate_surface_names_exist,
 )
 from ._helpers import _finalize_analysis, _suppress_output
 from ._state import sessions as _sessions
+
+
+def _cache_key(base: str, ground_effect: bool, rotational: bool) -> str:
+    """Build a cache key that varies with problem structure.
+
+    Beta is a continuous parameter that can be changed via set_val on a cached
+    problem, so it doesn't need its own key variant.  Ground effect and
+    rotational change the OpenMDAO model topology and require a fresh build.
+    """
+    if not ground_effect and not rotational:
+        return base
+    parts = [base]
+    if ground_effect:
+        parts.append("ge")
+    if rotational:
+        parts.append("rot")
+    return "_".join(parts)
 
 
 async def run_aero_analysis(
@@ -39,6 +59,9 @@ async def run_aero_analysis(
     reynolds_number: Annotated[float, "Reynolds number per unit length (1/m)"] = 1.0e6,
     density: Annotated[float, "Air density in kg/m^3"] = 0.38,
     cg: Annotated[list[float] | None, "Centre of gravity [x, y, z] in metres"] = None,
+    beta: Annotated[float, "Sideslip angle in degrees (incompatible with ground effect)"] = 0.0,
+    height_agl: Annotated[float, "Height above ground in metres (only active when surface has groundplane=True)"] = 8000.0,
+    omega: Annotated[list[float] | None, "Angular velocity [p, q, r] in deg/s for rotational effects (None = no rotation)"] = None,
     session_id: Annotated[str, "Session identifier"] = "default",
     run_name: Annotated[str | None, "Optional label for this run (stored in artifact metadata)"] = None,
 ) -> dict:
@@ -50,23 +73,36 @@ async def run_aero_analysis(
     if cg is None:
         cg = [0.0, 0.0, 0.0]
 
-    validate_flight_conditions(velocity, alpha, Mach_number, reynolds_number, density)
+    validate_flight_conditions(velocity, alpha, Mach_number, reynolds_number, density, beta=beta)
+    validate_height_agl(height_agl)
+    validate_omega(omega)
     session = _sessions.get(session_id)
     validate_surface_names_exist(surfaces, session)
 
     surface_dicts = session.get_surfaces(surfaces)
+    validate_ground_effect_compat(surface_dicts, beta)
     run_id = _make_run_id()
 
+    # Cache key changes when omega/groundplane are involved — invalidate if
+    # the problem structure differs (rotational or ground_effect flags).
+    has_ground = any(s.get("groundplane", False) for s in surface_dicts)
+    cache_key = _cache_key("aero", has_ground, omega is not None)
+
     def _run():
-        cached = session.get_cached_problem(surfaces, "aero")
+        cached = session.get_cached_problem(surfaces, cache_key)
         if cached is not None:
             prob = cached
             prob.set_val("v", velocity, units="m/s")
             prob.set_val("alpha", alpha, units="deg")
+            prob.set_val("beta", beta, units="deg")
             prob.set_val("Mach_number", Mach_number)
             prob.set_val("re", reynolds_number, units="1/m")
             prob.set_val("rho", density, units="kg/m**3")
             prob.set_val("cg", np.array(cg), units="m")
+            if has_ground:
+                prob.set_val("height_agl", height_agl, units="m")
+            if omega is not None:
+                prob.set_val("omega", np.array(omega) * np.pi / 180.0, units="rad/s")
         else:
             prob = build_aero_problem(
                 surface_dicts,
@@ -76,8 +112,11 @@ async def run_aero_analysis(
                 reynolds_number=reynolds_number,
                 density=density,
                 cg=cg,
+                beta=beta,
+                height_agl=height_agl,
+                omega=omega,
             )
-            session.store_problem(surfaces, "aero", prob)
+            session.store_problem(surfaces, cache_key, prob)
 
         prob.run_model()
         aero_results = extract_aero_results(prob, surface_dicts, "aero")
@@ -85,7 +124,7 @@ async def run_aero_analysis(
         return aero_results, standard
 
     t0 = time.perf_counter()
-    cache_hit = session.get_cached_problem(surfaces, "aero") is not None
+    cache_hit = session.get_cached_problem(surfaces, cache_key) is not None
     results, standard_detail = await asyncio.to_thread(_suppress_output, _run)
 
     session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
@@ -93,7 +132,10 @@ async def run_aero_analysis(
     inputs = {
         "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
         "reynolds_number": reynolds_number, "density": density,
+        "beta": beta, "height_agl": height_agl,
     }
+    if omega is not None:
+        inputs["omega"] = omega
     findings = validate_aero(results, context={"alpha": alpha})
     return await _finalize_analysis(
         tool_name="run_aero_analysis", run_id=run_id,
@@ -118,6 +160,9 @@ async def run_aerostruct_analysis(
     speed_of_sound: Annotated[float, "Speed of sound in m/s"] = 295.4,
     load_factor: Annotated[float, "Load factor (1.0 = 1-g cruise)"] = 1.0,
     empty_cg: Annotated[list[float] | None, "Empty CG location [x, y, z] in metres"] = None,
+    beta: Annotated[float, "Sideslip angle in degrees (incompatible with ground effect)"] = 0.0,
+    height_agl: Annotated[float, "Height above ground in metres (only active when surface has groundplane=True)"] = 8000.0,
+    omega: Annotated[list[float] | None, "Angular velocity [p, q, r] in deg/s for rotational effects (None = no rotation)"] = None,
     session_id: Annotated[str, "Session identifier"] = "default",
     run_name: Annotated[str | None, "Optional label for this run (stored in artifact metadata)"] = None,
 ) -> dict:
@@ -130,10 +175,13 @@ async def run_aerostruct_analysis(
     if empty_cg is None:
         empty_cg = [0.0, 0.0, 0.0]
 
-    validate_flight_conditions(velocity, alpha, Mach_number, reynolds_number, density)
+    validate_flight_conditions(velocity, alpha, Mach_number, reynolds_number, density, beta=beta)
+    validate_height_agl(height_agl)
+    validate_omega(omega)
     session = _sessions.get(session_id)
     validate_surface_names_exist(surfaces, session)
     surface_dicts = session.get_surfaces(surfaces)
+    validate_ground_effect_compat(surface_dicts, beta)
     for s in surface_dicts:
         validate_struct_props_present(s)
     run_id = _make_run_id()
@@ -141,12 +189,16 @@ async def run_aerostruct_analysis(
     from openaerostruct.utils.constants import grav_constant
     ct_val = CT if CT is not None else grav_constant * 17.0e-6
 
+    has_ground = any(s.get("groundplane", False) for s in surface_dicts)
+    cache_key = _cache_key("aerostruct", has_ground, omega is not None)
+
     def _run():
-        cached = session.get_cached_problem(surfaces, "aerostruct")
+        cached = session.get_cached_problem(surfaces, cache_key)
         if cached is not None:
             prob = cached
             prob.set_val("v", velocity, units="m/s")
             prob.set_val("alpha", alpha, units="deg")
+            prob.set_val("beta", beta, units="deg")
             prob.set_val("Mach_number", Mach_number)
             prob.set_val("re", reynolds_number, units="1/m")
             prob.set_val("rho", density, units="kg/m**3")
@@ -156,6 +208,10 @@ async def run_aerostruct_analysis(
             prob.set_val("speed_of_sound", speed_of_sound, units="m/s")
             prob.set_val("load_factor", load_factor)
             prob.set_val("empty_cg", np.array(empty_cg), units="m")
+            if has_ground:
+                prob.set_val("height_agl", height_agl, units="m")
+            if omega is not None:
+                prob.set_val("omega", np.array(omega) * np.pi / 180.0, units="rad/s")
         else:
             prob = build_aerostruct_problem(
                 surface_dicts,
@@ -170,8 +226,11 @@ async def run_aerostruct_analysis(
                 speed_of_sound=speed_of_sound,
                 load_factor=load_factor,
                 empty_cg=empty_cg,
+                beta=beta,
+                height_agl=height_agl,
+                omega=omega,
             )
-            session.store_problem(surfaces, "aerostruct", prob)
+            session.store_problem(surfaces, cache_key, prob)
 
         prob.run_model()
         as_results = extract_aerostruct_results(prob, surface_dicts, "AS_point_0")
@@ -179,7 +238,7 @@ async def run_aerostruct_analysis(
         return as_results, standard
 
     t0 = time.perf_counter()
-    cache_hit = session.get_cached_problem(surfaces, "aerostruct") is not None
+    cache_hit = session.get_cached_problem(surfaces, cache_key) is not None
     results, standard_detail = await asyncio.to_thread(_suppress_output, _run)
 
     session.store_mesh_snapshot(run_id, standard_detail.get("mesh_snapshot", {}))
@@ -188,7 +247,10 @@ async def run_aerostruct_analysis(
         "velocity": velocity, "alpha": alpha, "Mach_number": Mach_number,
         "reynolds_number": reynolds_number, "density": density,
         "W0": W0, "R": R, "speed_of_sound": speed_of_sound, "load_factor": load_factor,
+        "beta": beta, "height_agl": height_agl,
     }
+    if omega is not None:
+        inputs["omega"] = omega
     findings = validate_aerostruct(results, context={"alpha": alpha, "W0": W0, "surfaces": surface_dicts})
     return await _finalize_analysis(
         tool_name="run_aerostruct_analysis", run_id=run_id,
@@ -210,6 +272,7 @@ async def compute_drag_polar(
     reynolds_number: Annotated[float, "Reynolds number per unit length (1/m)"] = 1.0e6,
     density: Annotated[float, "Air density in kg/m^3"] = 0.38,
     cg: Annotated[list[float] | None, "Centre of gravity [x, y, z] in metres"] = None,
+    beta: Annotated[float, "Sideslip angle in degrees"] = 0.0,
     session_id: Annotated[str, "Session identifier"] = "default",
     run_name: Annotated[str | None, "Optional label for this run (stored in artifact metadata)"] = None,
 ) -> dict:
@@ -223,9 +286,11 @@ async def compute_drag_polar(
     if num_alpha < 2:
         raise ValueError("num_alpha must be >= 2")
 
+    validate_flight_conditions(velocity, alpha_start, Mach_number, reynolds_number, density, beta=beta)
     session = _sessions.get(session_id)
     validate_surface_names_exist(surfaces, session)
     surface_dicts = session.get_surfaces(surfaces)
+    validate_ground_effect_compat(surface_dicts, beta)
 
     alphas = list(np.linspace(alpha_start, alpha_end, num_alpha))
 
@@ -239,6 +304,7 @@ async def compute_drag_polar(
             reynolds_number=reynolds_number,
             density=density,
             cg=cg,
+            beta=beta,
         )
 
         CLs, CDs, CMs = [], [], []
@@ -277,6 +343,7 @@ async def compute_drag_polar(
         "alpha_start": alpha_start, "alpha_end": alpha_end, "num_alpha": num_alpha,
         "velocity": velocity, "Mach_number": Mach_number,
         "reynolds_number": reynolds_number, "density": density,
+        "beta": beta,
     }
 
     findings = validate_drag_polar(polar_results, context={"alpha_start": alpha_start})
@@ -298,6 +365,7 @@ async def compute_stability_derivatives(
     reynolds_number: Annotated[float, "Reynolds number per unit length (1/m)"] = 1.0e6,
     density: Annotated[float, "Air density in kg/m^3"] = 0.38,
     cg: Annotated[list[float] | None, "Centre of gravity [x, y, z] in metres — affects CM and static margin"] = None,
+    beta: Annotated[float, "Sideslip angle in degrees (sets operating point for derivative computation)"] = 0.0,
     session_id: Annotated[str, "Session identifier"] = "default",
     run_name: Annotated[str | None, "Optional label for this run (stored in artifact metadata)"] = None,
 ) -> dict:
@@ -310,7 +378,7 @@ async def compute_stability_derivatives(
     if cg is None:
         cg = [0.0, 0.0, 0.0]
 
-    validate_flight_conditions(velocity, alpha, Mach_number, reynolds_number, density)
+    validate_flight_conditions(velocity, alpha, Mach_number, reynolds_number, density, beta=beta)
     session = _sessions.get(session_id)
     validate_surface_names_exist(surfaces, session)
     surface_dicts = session.get_surfaces(surfaces)
@@ -327,6 +395,7 @@ async def compute_stability_derivatives(
         indep = om.IndepVarComp()
         indep.add_output("v", val=velocity, units="m/s")
         indep.add_output("alpha", val=alpha, units="deg")
+        indep.add_output("beta", val=beta, units="deg")
         indep.add_output("Mach_number", val=Mach_number)
         indep.add_output("re", val=reynolds_number, units="1/m")
         indep.add_output("rho", val=density, units="kg/m**3")
@@ -353,6 +422,7 @@ async def compute_stability_derivatives(
             ag = AeroPoint(surfaces=surface_dicts)
             prob.model.add_subsystem(pname, ag)
             prob.model.connect("v", pname + ".v")
+            prob.model.connect("beta", pname + ".beta")
             prob.model.connect("Mach_number", pname + ".Mach_number")
             prob.model.connect("re", pname + ".re")
             prob.model.connect("rho", pname + ".rho")
@@ -410,6 +480,7 @@ async def compute_stability_derivatives(
     inputs = {
         "alpha": alpha, "velocity": velocity, "Mach_number": Mach_number,
         "reynolds_number": reynolds_number, "density": density,
+        "beta": beta,
     }
 
     findings = validate_stability(results, context={"alpha": alpha})

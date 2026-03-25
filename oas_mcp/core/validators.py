@@ -37,13 +37,15 @@ def validate_fem_model_type(fem_model_type: str) -> None:
         raise ValueError(f"fem_model_type must be one of {valid}, got {fem_model_type!r}")
 
 
-def validate_flight_conditions(velocity, alpha, Mach_number, reynolds_number, density) -> None:
+def validate_flight_conditions(velocity, alpha, Mach_number, reynolds_number, density, beta=0.0) -> None:
     validate_positive(velocity, "velocity")
     validate_non_negative(Mach_number, "Mach_number")
     validate_positive(reynolds_number, "reynolds_number")
     validate_positive(density, "density")
     if not (-90 <= alpha <= 90):
         raise ValueError(f"alpha must be between -90 and 90 deg, got {alpha}")
+    if not (-180 <= beta <= 180):
+        raise ValueError(f"beta must be between -180 and 180 deg, got {beta}")
 
 
 def validate_surface_names_exist(names: list[str], session) -> None:
@@ -208,6 +210,26 @@ def validate_composite_params(
     # Normalise fractions to sum exactly to 1.0 to avoid OAS strict check
     normalised = [f / frac_sum for f in ply_fractions]
     return normalised
+
+
+def validate_ground_effect_compat(surfaces: list[dict], beta: float) -> None:
+    """Ensure ground effect and sideslip are not used simultaneously."""
+    has_groundplane = any(s.get("groundplane", False) for s in surfaces)
+    if has_groundplane and beta != 0.0:
+        raise ValueError(
+            "Ground effect (groundplane=True) is incompatible with sideslip (beta != 0). "
+            "Set beta=0 or disable groundplane on all surfaces."
+        )
+
+
+def validate_height_agl(height_agl: float) -> None:
+    if height_agl <= 0:
+        raise ValueError(f"height_agl must be positive, got {height_agl}")
+
+
+def validate_omega(omega: list[float] | None) -> None:
+    if omega is not None and len(omega) != 3:
+        raise ValueError(f"omega must be a 3-element list [p, q, r], got {len(omega)} elements")
 
 
 def validate_struct_props_present(surface: dict) -> None:

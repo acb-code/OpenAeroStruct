@@ -33,19 +33,30 @@ def _assemble_aero_model(
     reynolds_number: float,
     density: float,
     cg: list | None,
+    beta: float = 0.0,
+    height_agl: float = 8000.0,
+    omega: list | None = None,
 ) -> str:
     """Add IndepVarComp, Geometry groups, AeroPoint, and connections to prob.model.
     Returns the point_name."""
     if cg is None:
         cg = [0.0, 0.0, 0.0]
 
+    ground_effect = any(s.get("groundplane", False) for s in surfaces)
+    rotational = omega is not None
+
     indep = om.IndepVarComp()
     indep.add_output("v", val=velocity, units="m/s")
     indep.add_output("alpha", val=alpha, units="deg")
+    indep.add_output("beta", val=beta, units="deg")
     indep.add_output("Mach_number", val=Mach_number)
     indep.add_output("re", val=reynolds_number, units="1/m")
     indep.add_output("rho", val=density, units="kg/m**3")
     indep.add_output("cg", val=np.array(cg), units="m")
+    if ground_effect:
+        indep.add_output("height_agl", val=height_agl, units="m")
+    if rotational:
+        indep.add_output("omega", val=np.array(omega) * np.pi / 180.0, units="rad/s")
     prob.model.add_subsystem("prob_vars", indep, promotes=["*"])
 
     point_name = "aero"
@@ -55,11 +66,16 @@ def _assemble_aero_model(
         geom_group = Geometry(surface=surface)
         prob.model.add_subsystem(name, geom_group)
 
-    aero_group = AeroPoint(surfaces=surfaces)
+    aero_group = AeroPoint(surfaces=surfaces, rotational=rotational)
+    promotes = ["v", "alpha", "beta", "Mach_number", "re", "rho", "cg"]
+    if ground_effect:
+        promotes.append("height_agl")
+    if rotational:
+        promotes.append("omega")
     prob.model.add_subsystem(
         point_name,
         aero_group,
-        promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"],
+        promotes_inputs=promotes,
     )
 
     for surface in surfaces:
@@ -82,15 +98,22 @@ def _assemble_aerostruct_model(
     speed_of_sound: float,
     load_factor: float,
     empty_cg: list | None,
+    beta: float = 0.0,
+    height_agl: float = 8000.0,
+    omega: list | None = None,
 ) -> str:
     """Add IndepVarComp, AerostructGeometry, AerostructPoint, connections.
     Returns the point_name."""
     if empty_cg is None:
         empty_cg = [0.0, 0.0, 0.0]
 
+    ground_effect = any(s.get("groundplane", False) for s in surfaces)
+    rotational = omega is not None
+
     indep = om.IndepVarComp()
     indep.add_output("v", val=velocity, units="m/s")
     indep.add_output("alpha", val=alpha, units="deg")
+    indep.add_output("beta", val=beta, units="deg")
     indep.add_output("Mach_number", val=Mach_number)
     indep.add_output("re", val=reynolds_number, units="1/m")
     indep.add_output("rho", val=density, units="kg/m**3")
@@ -100,6 +123,10 @@ def _assemble_aerostruct_model(
     indep.add_output("speed_of_sound", val=speed_of_sound, units="m/s")
     indep.add_output("load_factor", val=load_factor)
     indep.add_output("empty_cg", val=np.array(empty_cg), units="m")
+    if ground_effect:
+        indep.add_output("height_agl", val=height_agl, units="m")
+    if rotational:
+        indep.add_output("omega", val=np.array(omega) * np.pi / 180.0, units="rad/s")
     prob.model.add_subsystem("prob_vars", indep, promotes=["*"])
 
     point_name = "AS_point_0"
@@ -109,14 +136,19 @@ def _assemble_aerostruct_model(
         as_geom = AerostructGeometry(surface=surface)
         prob.model.add_subsystem(name, as_geom)
 
-    AS_point = AerostructPoint(surfaces=surfaces)
+    AS_point = AerostructPoint(surfaces=surfaces, rotational=rotational)
+    promotes = [
+        "v", "alpha", "beta", "Mach_number", "re", "rho",
+        "CT", "R", "W0", "speed_of_sound", "empty_cg", "load_factor",
+    ]
+    if ground_effect:
+        promotes.append("height_agl")
+    if rotational:
+        promotes.extend(["omega", "cg"])
     prob.model.add_subsystem(
         point_name,
         AS_point,
-        promotes_inputs=[
-            "v", "alpha", "Mach_number", "re", "rho",
-            "CT", "R", "W0", "speed_of_sound", "empty_cg", "load_factor",
-        ],
+        promotes_inputs=promotes,
     )
 
     for surface in surfaces:
@@ -130,21 +162,29 @@ def _assemble_aerostruct_model(
     return point_name
 
 
-def _set_initial_values_aero(prob, velocity, alpha, Mach_number, reynolds_number, density, cg):
+def _set_initial_values_aero(prob, velocity, alpha, Mach_number, reynolds_number, density, cg,
+                              beta=0.0, height_agl=None, omega=None):
     prob.set_val("v", velocity, units="m/s")
     prob.set_val("alpha", alpha, units="deg")
+    prob.set_val("beta", beta, units="deg")
     prob.set_val("Mach_number", Mach_number)
     prob.set_val("re", reynolds_number, units="1/m")
     prob.set_val("rho", density, units="kg/m**3")
     prob.set_val("cg", np.array(cg if cg else [0.0, 0.0, 0.0]), units="m")
+    if height_agl is not None:
+        prob.set_val("height_agl", height_agl, units="m")
+    if omega is not None:
+        prob.set_val("omega", np.array(omega) * np.pi / 180.0, units="rad/s")
 
 
 def _set_initial_values_aerostruct(
     prob, velocity, alpha, Mach_number, reynolds_number, density,
     CT, R, W0, speed_of_sound, load_factor, empty_cg,
+    beta=0.0, height_agl=None, omega=None,
 ):
     prob.set_val("v", velocity, units="m/s")
     prob.set_val("alpha", alpha, units="deg")
+    prob.set_val("beta", beta, units="deg")
     prob.set_val("Mach_number", Mach_number)
     prob.set_val("re", reynolds_number, units="1/m")
     prob.set_val("rho", density, units="kg/m**3")
@@ -154,6 +194,10 @@ def _set_initial_values_aerostruct(
     prob.set_val("speed_of_sound", speed_of_sound, units="m/s")
     prob.set_val("load_factor", load_factor)
     prob.set_val("empty_cg", np.array(empty_cg if empty_cg else [0.0, 0.0, 0.0]), units="m")
+    if height_agl is not None:
+        prob.set_val("height_agl", height_agl, units="m")
+    if omega is not None:
+        prob.set_val("omega", np.array(omega) * np.pi / 180.0, units="rad/s")
 
 
 # ---------------------------------------------------------------------------
@@ -169,12 +213,24 @@ def build_aero_problem(
     reynolds_number: float = 1.0e6,
     density: float = 0.38,
     cg: list | None = None,
+    beta: float = 0.0,
+    height_agl: float = 8000.0,
+    omega: list | None = None,
 ) -> om.Problem:
     """Build and set up an aerodynamics-only OpenMDAO problem."""
     prob = om.Problem(reports=False)
-    _assemble_aero_model(prob, surfaces, velocity, alpha, Mach_number, reynolds_number, density, cg)
+    _assemble_aero_model(
+        prob, surfaces, velocity, alpha, Mach_number, reynolds_number, density, cg,
+        beta=beta, height_agl=height_agl, omega=omega,
+    )
     prob.setup(force_alloc_complex=False)
-    _set_initial_values_aero(prob, velocity, alpha, Mach_number, reynolds_number, density, cg)
+    ground_effect = any(s.get("groundplane", False) for s in surfaces)
+    _set_initial_values_aero(
+        prob, velocity, alpha, Mach_number, reynolds_number, density, cg,
+        beta=beta,
+        height_agl=height_agl if ground_effect else None,
+        omega=omega,
+    )
     return prob
 
 
@@ -191,6 +247,9 @@ def build_aerostruct_problem(
     speed_of_sound: float = 295.4,
     load_factor: float = 1.0,
     empty_cg: list | None = None,
+    beta: float = 0.0,
+    height_agl: float = 8000.0,
+    omega: list | None = None,
 ) -> om.Problem:
     """Build and set up a coupled aerostructural OpenMDAO problem."""
     if CT is None:
@@ -202,11 +261,16 @@ def build_aerostruct_problem(
     _assemble_aerostruct_model(
         prob, surfaces, velocity, alpha, Mach_number, reynolds_number,
         density, CT, R, W0, speed_of_sound, load_factor, empty_cg,
+        beta=beta, height_agl=height_agl, omega=omega,
     )
     prob.setup(force_alloc_complex=False)
+    ground_effect = any(s.get("groundplane", False) for s in surfaces)
     _set_initial_values_aerostruct(
         prob, velocity, alpha, Mach_number, reynolds_number, density,
         CT, R, W0, speed_of_sound, load_factor, empty_cg,
+        beta=beta,
+        height_agl=height_agl if ground_effect else None,
+        omega=omega,
     )
     return prob
 
@@ -292,6 +356,10 @@ def build_optimization_problem(
     prob.driver.options["tol"] = tolerance
     prob.driver.options["maxiter"] = max_iterations
 
+    fc_beta = flight_conditions.get("beta", 0.0)
+    fc_height_agl = flight_conditions.get("height_agl", 8000.0)
+    fc_omega = flight_conditions.get("omega")
+
     if analysis_type == "aero":
         point_name = _assemble_aero_model(
             prob, surfaces,
@@ -301,6 +369,7 @@ def build_optimization_problem(
             reynolds_number=flight_conditions.get("reynolds_number", 1.0e6),
             density=flight_conditions.get("density", 0.38),
             cg=flight_conditions.get("cg"),
+            beta=fc_beta, height_agl=fc_height_agl, omega=fc_omega,
         )
         obj_map = OBJECTIVE_MAP_AERO
         con_map = CONSTRAINT_NAME_MAP_AERO
@@ -319,6 +388,7 @@ def build_optimization_problem(
             speed_of_sound=flight_conditions.get("speed_of_sound", 295.4),
             load_factor=flight_conditions.get("load_factor", 1.0),
             empty_cg=flight_conditions.get("empty_cg"),
+            beta=fc_beta, height_agl=fc_height_agl, omega=fc_omega,
         )
         obj_map = OBJECTIVE_MAP_AEROSTRUCT
         con_map = CONSTRAINT_NAME_MAP_AEROSTRUCT
@@ -400,6 +470,7 @@ def build_optimization_problem(
                     pass
 
     # Set initial values
+    ground_effect = any(s.get("groundplane", False) for s in surfaces)
     if analysis_type == "aero":
         _set_initial_values_aero(
             prob,
@@ -409,6 +480,9 @@ def build_optimization_problem(
             flight_conditions.get("reynolds_number", 1.0e6),
             flight_conditions.get("density", 0.38),
             flight_conditions.get("cg"),
+            beta=fc_beta,
+            height_agl=fc_height_agl if ground_effect else None,
+            omega=fc_omega,
         )
     else:
         _set_initial_values_aerostruct(
@@ -424,6 +498,9 @@ def build_optimization_problem(
             flight_conditions.get("speed_of_sound", 295.4),
             flight_conditions.get("load_factor", 1.0),
             flight_conditions.get("empty_cg"),
+            beta=fc_beta,
+            height_agl=fc_height_agl if ground_effect else None,
+            omega=fc_omega,
         )
 
     return prob, point_name

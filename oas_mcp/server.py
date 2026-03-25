@@ -101,6 +101,10 @@ CRITICAL CONSTRAINTS:
     material properties (E, G, yield_stress, mrho). Aero-only surfaces will error.
   • Surface names are arbitrary strings but must match exactly between create_surface
     and analysis calls.
+  • Ground effect (groundplane=True on create_surface) requires symmetry=True and is
+    incompatible with sideslip (beta != 0). Using both raises an error.
+  • omega (angular velocity) changes the OpenMDAO model topology — the first call with
+    omega builds a new problem; subsequent calls reuse that rotational-enabled cache.
 
 RESPONSE ENVELOPE (all analysis tools):
   Every analysis tool returns a versioned envelope (schema_version="1.0"):
@@ -143,6 +147,12 @@ PARAMETER TIPS:
     wing_type="rect" produces a flat untwisted planform — simpler but less realistic
   • failure > 1.0 means structural failure (utilisation ratio > 1); failure < 1.0 = OK
   • L_equals_W residual near 0 means the wing is sized to carry the aircraft weight
+  • beta (sideslip angle, deg): set on run_aero_analysis / run_aerostruct_analysis /
+    compute_drag_polar / compute_stability_derivatives. Default 0.0.
+  • groundplane=True on create_surface enables ground effect; pair with height_agl
+    (metres above ground, default 8000) on analysis tools. Low height_agl → more effect.
+  • omega=[p, q, r] in deg/s on analysis tools enables rotational velocity effects
+    (e.g. roll rate). Requires cg to be set for the moment arm calculation.
 
 CONTROL-POINT ORDERING:
   • All *_cp arrays (twist_cp, chord_cp, thickness_cp, etc.) are ordered ROOT-to-TIP:

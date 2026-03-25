@@ -73,6 +73,7 @@ async def create_surface(
     sigma_t2: Annotated[float | None, "Transverse tensile strength in Pa"] = None,
     sigma_c2: Annotated[float | None, "Transverse compressive strength in Pa"] = None,
     sigma_12max: Annotated[float | None, "Maximum shear strength in Pa"] = None,
+    groundplane: Annotated[bool, "Enable ground-effect modelling (requires symmetry=True, incompatible with beta/sideslip)"] = False,
     num_twist_cp: Annotated[int | None, "Number of twist control points for CRM/uCRM_based mesh generation (None = auto)"] = None,
     session_id: Annotated[str, "Session identifier"] = "default",
 ) -> dict:
@@ -89,6 +90,8 @@ async def create_surface(
         raise ValueError(f"root_chord must be positive, got {root_chord}")
     if span <= 0:
         raise ValueError(f"span must be positive, got {span}")
+    if groundplane and not symmetry:
+        raise ValueError("Ground effect (groundplane=True) requires symmetry=True")
 
     # Validate and normalise composite params early (before expensive mesh build)
     normalised_ply_fractions = None
@@ -147,6 +150,7 @@ async def create_surface(
             "c_max_t": c_max_t,
             "with_viscous": with_viscous,
             "with_wave": with_wave,
+            "groundplane": groundplane,
         }
 
         if chord_cp is not None:
