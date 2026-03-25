@@ -3,10 +3,13 @@ Build OpenMDAO Problem instances for aero and aerostruct analyses.
 
 The _assemble_* helpers add subsystems and connections but do NOT call setup().
 The build_* helpers call the assembler then setup().
-build_optimization_problem uses the assembler, adds DVs/constraints/objective, then setup().
+build_*_optimization_problem uses the assembler, adds DVs/constraints/objective, then setup().
 """
 
 from __future__ import annotations
+
+import enum
+from dataclasses import dataclass
 
 import numpy as np
 import openmdao.api as om
@@ -201,7 +204,7 @@ def _set_initial_values_aerostruct(
 
 
 # ---------------------------------------------------------------------------
-# Public builders
+# Public builders (analysis only — no optimisation)
 # ---------------------------------------------------------------------------
 
 
@@ -276,10 +279,21 @@ def build_aerostruct_problem(
 
 
 # ---------------------------------------------------------------------------
-# DV / constraint / objective name mappings
+# DV / constraint / objective path resolution
 # ---------------------------------------------------------------------------
 
-DV_NAME_MAP = {
+
+class PathKind(enum.Enum):
+    """Category of OpenMDAO variable being resolved."""
+    DV = "dv"
+    CONSTRAINT = "constraint"
+    OBJECTIVE = "objective"
+
+
+# Design variable path templates.
+# Templates use ``{name}`` for the surface name.  Scalar DVs (``alpha``,
+# ``alpha_maneuver``, ``fuel_mass``) have literal paths — no substitution.
+_DV_PATH_MAP: dict[str, str] = {
     "twist": "{name}.twist_cp",
     "thickness": "{name}.thickness_cp",
     "chord": "{name}.chord_cp",
@@ -293,44 +307,468 @@ DV_NAME_MAP = {
     "fuel_mass": "fuel_mass",
 }
 
-CONSTRAINT_NAME_MAP_AERO = {
+# DVs whose path is a literal string (no surface_name substitution needed).
+_SCALAR_DVS: frozenset[str] = frozenset(
+    k for k, v in _DV_PATH_MAP.items() if "{name}" not in v
+)
+
+# Aero-only constraint path templates.
+# Templates use ``{point}`` for the analysis point name and ``{name}`` for
+# the surface name.
+_CONSTRAINT_PATH_MAP_AERO: dict[str, str] = {
     "CL": "{point}.{name}_perf.CL",
     "CD": "{point}.{name}_perf.CD",
     "CM": "{point}.CM",
 }
 
-CONSTRAINT_NAME_MAP_AEROSTRUCT = {
+# Aerostruct constraint path templates.
+# Includes structural constraints (``failure``, ``thickness_intersects``,
+# ``L_equals_W``) and multipoint-only top-level constraints
+# (``fuel_vol_delta``, ``fuel_diff``) that need no point/name substitution.
+_CONSTRAINT_PATH_MAP_AEROSTRUCT: dict[str, str] = {
     "CL": "{point}.{name}_perf.CL",
     "CD": "{point}.{name}_perf.CD",
     "CM": "{point}.CM",
     "failure": "{point}.{name}_perf.failure",
-    # thickness_intersects is tube-only — raises ValueError for wingbox surfaces
     "thickness_intersects": "{point}.{name}_perf.thickness_intersects",
     "L_equals_W": "{point}.L_equals_W",
-    # Multipoint-only top-level constraints (no point/name substitution)
     "fuel_vol_delta": "fuel_vol_delta.fuel_vol_delta",
     "fuel_diff": "fuel_diff",
 }
 
-OBJECTIVE_MAP_AERO = {
+# Constraint templates that are top-level (no point/name substitution).
+_TOPLEVEL_CONSTRAINTS: frozenset[str] = frozenset(
+    k for k, v in _CONSTRAINT_PATH_MAP_AEROSTRUCT.items()
+    if "{point}" not in v and "{name}" not in v
+)
+
+# Aero-only objective path templates.
+# Templates use ``{point}`` for the analysis point name and ``{name}`` for
+# the surface name.
+_OBJECTIVE_PATH_MAP_AERO: dict[str, str] = {
     "CD": "{point}.CD",
     "CL": "{point}.CL",
 }
 
-OBJECTIVE_MAP_AEROSTRUCT = {
+# Aerostruct objective path templates.
+_OBJECTIVE_PATH_MAP_AEROSTRUCT: dict[str, str] = {
     "fuelburn": "{point}.fuelburn",
     "structural_mass": "{name}.structural_mass",
     "CD": "{point}.{name}_perf.CD",
 }
 
 
+def make_om_path(
+    kind: PathKind,
+    name: str,
+    *,
+    surface_name: str = "",
+    point_name: str = "",
+    analysis_type: str = "aero",
+) -> str:
+    """Return the OpenMDAO absolute path for a named DV, constraint, or objective.
+
+    Handles ``_cp`` suffix aliasing (e.g. ``twist_cp`` resolves to ``twist``),
+    scalar DVs (no surface substitution), and top-level constraints (no point
+    substitution).
+
+    Raises ``ValueError`` for unknown names or names incompatible with the
+    analysis type.
+    """
+    canonical = name
+    if kind == PathKind.DV:
+        template = _DV_PATH_MAP.get(name)
+        if template is None and name.endswith("_cp"):
+            canonical = name[:-3]
+            template = _DV_PATH_MAP.get(canonical)
+        if template is None:
+            raise ValueError(
+                f"Unknown design variable {name!r}. Options: {sorted(_DV_PATH_MAP)}"
+            )
+        if canonical in _SCALAR_DVS:
+            return template
+        return template.format(name=surface_name, point=point_name)
+
+    if kind == PathKind.CONSTRAINT:
+        con_map = (
+            _CONSTRAINT_PATH_MAP_AEROSTRUCT
+            if analysis_type == "aerostruct"
+            else _CONSTRAINT_PATH_MAP_AERO
+        )
+        template = con_map.get(name)
+        if template is None:
+            raise ValueError(
+                f"Unknown constraint {name!r}. Options: {sorted(con_map)}"
+            )
+        if name in _TOPLEVEL_CONSTRAINTS:
+            return template
+        return template.format(name=surface_name, point=point_name)
+
+    if kind == PathKind.OBJECTIVE:
+        obj_map = (
+            _OBJECTIVE_PATH_MAP_AEROSTRUCT
+            if analysis_type == "aerostruct"
+            else _OBJECTIVE_PATH_MAP_AERO
+        )
+        template = obj_map.get(name)
+        if template is None:
+            raise ValueError(
+                f"Unknown objective {name!r}. Options: {sorted(obj_map)}"
+            )
+        return template.format(name=surface_name, point=point_name)
+
+    raise ValueError(f"Unknown PathKind {kind!r}")  # pragma: no cover
+
+
+def resolve_dv_paths(
+    design_variables: list[dict],
+    surface_name: str,
+    point_name: str,
+    analysis_type: str = "aero",
+) -> dict[str, str]:
+    """Return ``{dv_user_name: om_path}`` for each DV in the list."""
+    result: dict[str, str] = {}
+    for dv in design_variables:
+        dv_name = dv["name"]
+        path = make_om_path(
+            PathKind.DV, dv_name,
+            surface_name=surface_name,
+            point_name=point_name,
+            analysis_type=analysis_type,
+        )
+        result[dv_name] = path
+    return result
+
+
+def resolve_objective_path(
+    objective: str,
+    surface_name: str,
+    point_name: str,
+    analysis_type: str = "aero",
+) -> str:
+    """Return the OpenMDAO path for the given objective name."""
+    return make_om_path(
+        PathKind.OBJECTIVE, objective,
+        surface_name=surface_name,
+        point_name=point_name,
+        analysis_type=analysis_type,
+    )
+
+
+# Backward-compatible aliases for external callers.
+# Prefer make_om_path / resolve_dv_paths / resolve_objective_path.
+DV_NAME_MAP = _DV_PATH_MAP
+CONSTRAINT_NAME_MAP_AERO = _CONSTRAINT_PATH_MAP_AERO
+CONSTRAINT_NAME_MAP_AEROSTRUCT = _CONSTRAINT_PATH_MAP_AEROSTRUCT
+OBJECTIVE_MAP_AERO = _OBJECTIVE_PATH_MAP_AERO
+OBJECTIVE_MAP_AEROSTRUCT = _OBJECTIVE_PATH_MAP_AEROSTRUCT
+_MP_TOPLEVEL_CONSTRAINTS = _TOPLEVEL_CONSTRAINTS
+_MP_SCALAR_DVS = _SCALAR_DVS
+
+
 def resolve_path(template: str, name: str, point: str) -> str:
+    """Deprecated — use ``make_om_path`` instead."""
     return template.format(name=name, point=point)
 
 
 # ---------------------------------------------------------------------------
-# Optimisation problem builder
+# Solver configuration
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SolverConfig:
+    """Non-linear and linear solver settings for coupled aerostructural problems.
+
+    Has no effect on aero-only problems (no coupled system to solve).
+    When ``None`` is passed to builder functions, they apply their own defaults:
+    - Single-point aerostruct: OpenMDAO defaults (DirectSolver / Newton as applicable)
+    - Multipoint aerostruct: LinearBlockGS with Aitken on each coupled group
+    """
+    # Nonlinear solver: "default" keeps OpenMDAO's choice, "newton" or "nlbgs"
+    nonlinear_solver: str = "default"
+    nonlinear_maxiter: int = 20
+    nonlinear_atol: float = 1e-8
+
+    # Linear solver: "default" keeps OpenMDAO's choice, "direct" or "lbgs"
+    linear_solver: str = "default"
+    linear_maxiter: int = 30
+    use_aitken: bool = True
+
+    iprint: int = 0
+
+
+# Default config for multipoint problems (matches previous hardcoded behaviour).
+_MULTIPOINT_DEFAULT_SOLVER_CONFIG = SolverConfig(
+    linear_solver="lbgs",
+    linear_maxiter=30,
+    use_aitken=True,
+    iprint=0,
+)
+
+
+def _apply_solver_config(
+    prob: om.Problem,
+    point_names: list[str],
+    config: SolverConfig,
+) -> None:
+    """Apply solver configuration to coupled groups in each analysis point."""
+    for pt in point_names:
+        pt_group = getattr(prob.model, pt, None)
+        if pt_group is None:
+            continue
+        coupled = getattr(pt_group, "coupled", None)
+        if coupled is None:
+            continue
+
+        if config.nonlinear_solver == "newton":
+            coupled.nonlinear_solver = om.NewtonSolver(
+                iprint=config.iprint,
+                maxiter=config.nonlinear_maxiter,
+                atol=config.nonlinear_atol,
+            )
+        elif config.nonlinear_solver == "nlbgs":
+            coupled.nonlinear_solver = om.NonlinearBlockGS(
+                iprint=config.iprint,
+                maxiter=config.nonlinear_maxiter,
+                atol=config.nonlinear_atol,
+            )
+        # "default" — leave OpenMDAO's choice
+
+        if config.linear_solver == "direct":
+            coupled.linear_solver = om.DirectSolver(iprint=config.iprint)
+        elif config.linear_solver == "lbgs":
+            coupled.linear_solver = om.LinearBlockGS(
+                iprint=config.iprint,
+                maxiter=config.linear_maxiter,
+                use_aitken=config.use_aitken,
+            )
+        # "default" — leave OpenMDAO's choice
+
+
+# ---------------------------------------------------------------------------
+# Shared optimisation helpers
+# ---------------------------------------------------------------------------
+
+
+def _add_dvs_constraints_objective(
+    prob: om.Problem,
+    surfaces: list[dict],
+    design_variables: list[dict],
+    constraints: list[dict],
+    objective: str,
+    objective_scaler: float,
+    point_name: str,
+    analysis_type: str,
+) -> None:
+    """Add design variables, constraints, and objective to the problem model.
+
+    Used by both single-point and multipoint optimisation builders.
+    """
+    validate_design_variables_for_surfaces(design_variables, surfaces)
+    primary_name = surfaces[0]["name"] if surfaces else "wing"
+
+    # --- Design variables ---
+    for dv in design_variables:
+        dv_name = dv["name"]
+        path = make_om_path(
+            PathKind.DV, dv_name,
+            surface_name=primary_name, point_name=point_name,
+        )
+        kwargs: dict = {}
+        if "lower" in dv:
+            kwargs["lower"] = dv["lower"]
+        if "upper" in dv:
+            kwargs["upper"] = dv["upper"]
+        if "scaler" in dv:
+            kwargs["scaler"] = dv["scaler"]
+        prob.model.add_design_var(path, **kwargs)
+
+    # --- Constraints ---
+    con_map = (
+        _CONSTRAINT_PATH_MAP_AEROSTRUCT
+        if analysis_type == "aerostruct"
+        else _CONSTRAINT_PATH_MAP_AERO
+    )
+    for con in constraints:
+        con_name = con["name"]
+        template = con_map.get(con_name)
+        if template is None:
+            raise ValueError(f"Unknown constraint {con_name!r}. Options: {sorted(con_map)}")
+        if con_name == "thickness_intersects":
+            wingbox_surfs = [s["name"] for s in surfaces if s.get("fem_model_type") == "wingbox"]
+            if wingbox_surfs:
+                raise ValueError(
+                    f"Constraint 'thickness_intersects' is only available for tube "
+                    f"fem_model_type surfaces. Surface(s) {wingbox_surfs} use 'wingbox'. "
+                    f"Remove 'thickness_intersects' from constraints for wingbox optimizations."
+                )
+        if con_name in _TOPLEVEL_CONSTRAINTS:
+            path = template
+        else:
+            path = template.format(name=primary_name, point=point_name)
+        kwargs = {}
+        if "equals" in con:
+            kwargs["equals"] = con["equals"]
+        if "lower" in con:
+            kwargs["lower"] = con["lower"]
+        if "upper" in con:
+            kwargs["upper"] = con["upper"]
+        prob.model.add_constraint(path, **kwargs)
+
+    # --- Objective ---
+    obj_map = (
+        _OBJECTIVE_PATH_MAP_AEROSTRUCT
+        if analysis_type == "aerostruct"
+        else _OBJECTIVE_PATH_MAP_AERO
+    )
+    obj_template = obj_map.get(objective)
+    if obj_template is None:
+        raise ValueError(f"Unknown objective {objective!r}. Options: {sorted(obj_map)}")
+    obj_path = obj_template.format(name=primary_name, point=point_name)
+    obj_kwargs: dict = {"scaler": objective_scaler} if objective_scaler != 1.0 else {}
+    prob.model.add_objective(obj_path, **obj_kwargs)
+
+
+def _set_cp_initial_values(prob: om.Problem, surfaces: list[dict]) -> None:
+    """Set surface-level control-point array initial values after setup.
+
+    Ensures early ``prob.get_val()`` calls return the surface-dict values
+    rather than OpenMDAO's default (1.0).
+    """
+    cp_keys = ("twist_cp", "thickness_cp", "t_over_c_cp",
+               "spar_thickness_cp", "skin_thickness_cp")
+    for surface in surfaces:
+        sname = surface["name"]
+        for key in cp_keys:
+            if key in surface:
+                try:
+                    prob.set_val(f"{sname}.{key}", surface[key])
+                except Exception:
+                    pass
+
+
+def _extract_aero_fc(fc: dict) -> dict:
+    """Unpack a flight_conditions dict into kwargs for aero assembler/init."""
+    return {
+        "velocity": fc.get("velocity", 248.136),
+        "alpha": fc.get("alpha", 5.0),
+        "Mach_number": fc.get("Mach_number", 0.84),
+        "reynolds_number": fc.get("reynolds_number", 1.0e6),
+        "density": fc.get("density", 0.38),
+        "cg": fc.get("cg"),
+        "beta": fc.get("beta", 0.0),
+        "height_agl": fc.get("height_agl", 8000.0),
+        "omega": fc.get("omega"),
+    }
+
+
+def _extract_aerostruct_fc(fc: dict) -> dict:
+    """Unpack a flight_conditions dict into kwargs for aerostruct assembler/init."""
+    return {
+        "velocity": fc.get("velocity", 248.136),
+        "alpha": fc.get("alpha", 5.0),
+        "Mach_number": fc.get("Mach_number", 0.84),
+        "reynolds_number": fc.get("reynolds_number", 1.0e6),
+        "density": fc.get("density", 0.38),
+        "CT": fc.get("CT", grav_constant * 17.0e-6),
+        "R": fc.get("R", 11.165e6),
+        "W0": fc.get("W0", 0.4 * 3e5),
+        "speed_of_sound": fc.get("speed_of_sound", 295.4),
+        "load_factor": fc.get("load_factor", 1.0),
+        "empty_cg": fc.get("empty_cg"),
+        "beta": fc.get("beta", 0.0),
+        "height_agl": fc.get("height_agl", 8000.0),
+        "omega": fc.get("omega"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Optimisation problem builders
+# ---------------------------------------------------------------------------
+
+
+def build_aero_optimization_problem(
+    surfaces: list[dict],
+    objective: str,
+    design_variables: list[dict],
+    constraints: list[dict],
+    flight_conditions: dict,
+    objective_scaler: float = 1.0,
+    tolerance: float = 1e-6,
+    max_iterations: int = 200,
+) -> tuple[om.Problem, str]:
+    """Build and set up an aero-only optimisation problem.
+
+    Returns ``(prob, point_name)``.  The caller should call ``prob.run_driver()``.
+    """
+    prob = om.Problem(reports=False)
+    prob.driver = om.ScipyOptimizeDriver()
+    prob.driver.options["tol"] = tolerance
+    prob.driver.options["maxiter"] = max_iterations
+
+    fc = _extract_aero_fc(flight_conditions)
+    point_name = _assemble_aero_model(prob, surfaces, **fc)
+
+    _add_dvs_constraints_objective(
+        prob, surfaces, design_variables, constraints,
+        objective, objective_scaler, point_name, "aero",
+    )
+
+    prob.setup(force_alloc_complex=False)
+    _set_cp_initial_values(prob, surfaces)
+
+    ground_effect = any(s.get("groundplane", False) for s in surfaces)
+    _set_initial_values_aero(
+        prob, **{**fc, "height_agl": fc["height_agl"] if ground_effect else None},
+    )
+    return prob, point_name
+
+
+def build_aerostruct_optimization_problem(
+    surfaces: list[dict],
+    objective: str,
+    design_variables: list[dict],
+    constraints: list[dict],
+    flight_conditions: dict,
+    objective_scaler: float = 1.0,
+    tolerance: float = 1e-6,
+    max_iterations: int = 200,
+    solver_config: SolverConfig | None = None,
+) -> tuple[om.Problem, str]:
+    """Build and set up a single-point aerostructural optimisation problem.
+
+    Returns ``(prob, point_name)``.  The caller should call ``prob.run_driver()``.
+
+    Parameters
+    ----------
+    solver_config : SolverConfig or None
+        Solver settings for the coupled group.  ``None`` keeps OpenMDAO defaults.
+    """
+    prob = om.Problem(reports=False)
+    prob.driver = om.ScipyOptimizeDriver()
+    prob.driver.options["tol"] = tolerance
+    prob.driver.options["maxiter"] = max_iterations
+
+    fc = _extract_aerostruct_fc(flight_conditions)
+    point_name = _assemble_aerostruct_model(prob, surfaces, **fc)
+
+    _add_dvs_constraints_objective(
+        prob, surfaces, design_variables, constraints,
+        objective, objective_scaler, point_name, "aerostruct",
+    )
+
+    prob.setup(force_alloc_complex=False)
+    _set_cp_initial_values(prob, surfaces)
+
+    if solver_config is not None:
+        _apply_solver_config(prob, [point_name], solver_config)
+
+    ground_effect = any(s.get("groundplane", False) for s in surfaces)
+    _set_initial_values_aerostruct(
+        prob, **{**fc, "height_agl": fc["height_agl"] if ground_effect else None},
+    )
+    return prob, point_name
 
 
 def build_optimization_problem(
@@ -344,166 +782,28 @@ def build_optimization_problem(
     tolerance: float = 1e-6,
     max_iterations: int = 200,
 ) -> tuple[om.Problem, str]:
+    """Build and set up an optimisation problem (dispatcher).
+
+    Delegates to ``build_aero_optimization_problem`` or
+    ``build_aerostruct_optimization_problem`` based on *analysis_type*.
+
+    Returns ``(prob, point_name)``.
     """
-    Build and set up an optimisation problem.
-
-    Returns (prob, point_name).  The caller should call prob.run_driver().
-    """
-    prob = om.Problem(reports=False)
-
-    # Configure driver before setup
-    prob.driver = om.ScipyOptimizeDriver()
-    prob.driver.options["tol"] = tolerance
-    prob.driver.options["maxiter"] = max_iterations
-
-    fc_beta = flight_conditions.get("beta", 0.0)
-    fc_height_agl = flight_conditions.get("height_agl", 8000.0)
-    fc_omega = flight_conditions.get("omega")
-
     if analysis_type == "aero":
-        point_name = _assemble_aero_model(
-            prob, surfaces,
-            velocity=flight_conditions.get("velocity", 248.136),
-            alpha=flight_conditions.get("alpha", 5.0),
-            Mach_number=flight_conditions.get("Mach_number", 0.84),
-            reynolds_number=flight_conditions.get("reynolds_number", 1.0e6),
-            density=flight_conditions.get("density", 0.38),
-            cg=flight_conditions.get("cg"),
-            beta=fc_beta, height_agl=fc_height_agl, omega=fc_omega,
+        return build_aero_optimization_problem(
+            surfaces, objective, design_variables, constraints,
+            flight_conditions,
+            objective_scaler=objective_scaler,
+            tolerance=tolerance,
+            max_iterations=max_iterations,
         )
-        obj_map = OBJECTIVE_MAP_AERO
-        con_map = CONSTRAINT_NAME_MAP_AERO
-    else:
-        CT = flight_conditions.get("CT", grav_constant * 17.0e-6)
-        point_name = _assemble_aerostruct_model(
-            prob, surfaces,
-            velocity=flight_conditions.get("velocity", 248.136),
-            alpha=flight_conditions.get("alpha", 5.0),
-            Mach_number=flight_conditions.get("Mach_number", 0.84),
-            reynolds_number=flight_conditions.get("reynolds_number", 1.0e6),
-            density=flight_conditions.get("density", 0.38),
-            CT=CT,
-            R=flight_conditions.get("R", 11.165e6),
-            W0=flight_conditions.get("W0", 0.4 * 3e5),
-            speed_of_sound=flight_conditions.get("speed_of_sound", 295.4),
-            load_factor=flight_conditions.get("load_factor", 1.0),
-            empty_cg=flight_conditions.get("empty_cg"),
-            beta=fc_beta, height_agl=fc_height_agl, omega=fc_omega,
-        )
-        obj_map = OBJECTIVE_MAP_AEROSTRUCT
-        con_map = CONSTRAINT_NAME_MAP_AEROSTRUCT
-
-    validate_design_variables_for_surfaces(design_variables, surfaces)
-
-    primary_name = surfaces[0]["name"] if surfaces else "wing"
-
-    # Add design variables
-    for dv in design_variables:
-        dv_name = dv["name"]
-        template = DV_NAME_MAP.get(dv_name)
-        if template is None:
-            # Accept _cp-suffixed names as aliases (e.g. twist_cp → twist)
-            if dv_name.endswith("_cp"):
-                template = DV_NAME_MAP.get(dv_name[:-3])
-            if template is None:
-                raise ValueError(
-                    f"Unknown design variable {dv_name!r}. Options: {list(DV_NAME_MAP)}"
-                )
-        path = resolve_path(template, primary_name, point_name)
-        kwargs = {}
-        if "lower" in dv:
-            kwargs["lower"] = dv["lower"]
-        if "upper" in dv:
-            kwargs["upper"] = dv["upper"]
-        if "scaler" in dv:
-            kwargs["scaler"] = dv["scaler"]
-        prob.model.add_design_var(path, **kwargs)
-
-    # Add constraints
-    for con in constraints:
-        con_name = con["name"]
-        template = con_map.get(con_name)
-        if template is None:
-            raise ValueError(f"Unknown constraint {con_name!r}. Options: {list(con_map)}")
-        if con_name == "thickness_intersects":
-            wingbox_surfs = [s["name"] for s in surfaces if s.get("fem_model_type") == "wingbox"]
-            if wingbox_surfs:
-                raise ValueError(
-                    f"Constraint 'thickness_intersects' is only available for tube "
-                    f"fem_model_type surfaces. Surface(s) {wingbox_surfs} use 'wingbox'. "
-                    f"Remove 'thickness_intersects' from constraints for wingbox optimizations."
-                )
-        path = resolve_path(template, primary_name, point_name)
-        kwargs = {}
-        if "equals" in con:
-            kwargs["equals"] = con["equals"]
-        if "lower" in con:
-            kwargs["lower"] = con["lower"]
-        if "upper" in con:
-            kwargs["upper"] = con["upper"]
-        prob.model.add_constraint(path, **kwargs)
-
-    # Add objective
-    obj_template = obj_map.get(objective)
-    if obj_template is None:
-        raise ValueError(f"Unknown objective {objective!r}. Options: {list(obj_map)}")
-    obj_path = resolve_path(obj_template, primary_name, point_name)
-    obj_kwargs = {"scaler": objective_scaler} if objective_scaler != 1.0 else {}
-    prob.model.add_objective(obj_path, **obj_kwargs)
-
-    prob.setup(force_alloc_complex=False)
-
-    # Explicitly set surface-level array initial values so that any early
-    # prob.get_val() calls (e.g. in OptimizationTracker.record_initial) do not
-    # trigger OpenMDAO finalization with default values (1.0) instead of the
-    # values from the surface dict, which would shift the optimizer's starting
-    # point and lead to a different local optimum.
-    _cp_keys = ("twist_cp", "thickness_cp", "t_over_c_cp",
-                 "spar_thickness_cp", "skin_thickness_cp")
-    for surface in surfaces:
-        sname = surface["name"]
-        for key in _cp_keys:
-            if key in surface:
-                try:
-                    prob.set_val(f"{sname}.{key}", surface[key])
-                except Exception:
-                    pass
-
-    # Set initial values
-    ground_effect = any(s.get("groundplane", False) for s in surfaces)
-    if analysis_type == "aero":
-        _set_initial_values_aero(
-            prob,
-            flight_conditions.get("velocity", 248.136),
-            flight_conditions.get("alpha", 5.0),
-            flight_conditions.get("Mach_number", 0.84),
-            flight_conditions.get("reynolds_number", 1.0e6),
-            flight_conditions.get("density", 0.38),
-            flight_conditions.get("cg"),
-            beta=fc_beta,
-            height_agl=fc_height_agl if ground_effect else None,
-            omega=fc_omega,
-        )
-    else:
-        _set_initial_values_aerostruct(
-            prob,
-            flight_conditions.get("velocity", 248.136),
-            flight_conditions.get("alpha", 5.0),
-            flight_conditions.get("Mach_number", 0.84),
-            flight_conditions.get("reynolds_number", 1.0e6),
-            flight_conditions.get("density", 0.38),
-            flight_conditions.get("CT", grav_constant * 17.0e-6),
-            flight_conditions.get("R", 11.165e6),
-            flight_conditions.get("W0", 0.4 * 3e5),
-            flight_conditions.get("speed_of_sound", 295.4),
-            flight_conditions.get("load_factor", 1.0),
-            flight_conditions.get("empty_cg"),
-            beta=fc_beta,
-            height_agl=fc_height_agl if ground_effect else None,
-            omega=fc_omega,
-        )
-
-    return prob, point_name
+    return build_aerostruct_optimization_problem(
+        surfaces, objective, design_variables, constraints,
+        flight_conditions,
+        objective_scaler=objective_scaler,
+        tolerance=tolerance,
+        max_iterations=max_iterations,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -640,10 +940,70 @@ def _assemble_multipoint_aerostruct_model(
     return point_names
 
 
-# Top-level constraint templates that need no point/name substitution
-_MP_TOPLEVEL_CONSTRAINTS = {"fuel_vol_delta", "fuel_diff"}
-# DV names that are scalar top-level variables (not surface-path-formatted)
-_MP_SCALAR_DVS = {"alpha_maneuver", "fuel_mass"}
+def _add_multipoint_dvs_constraints_objective(
+    prob: om.Problem,
+    surfaces: list[dict],
+    design_variables: list[dict],
+    constraints: list[dict],
+    objective: str,
+    point_names: list[str],
+) -> None:
+    """Add DVs, constraints, and objective for multipoint optimisation.
+
+    Handles scalar DVs (no surface substitution) and per-point constraint
+    targeting via the optional ``"point"`` key in constraint dicts.
+    """
+    validate_design_variables_for_surfaces(design_variables, surfaces)
+    primary_name = surfaces[0]["name"] if surfaces else "wing"
+
+    # --- Design variables ---
+    for dv in design_variables:
+        dv_name = dv.get("name", "")
+        path = make_om_path(
+            PathKind.DV, dv_name,
+            surface_name=primary_name, point_name=point_names[0],
+        )
+        kwargs: dict = {}
+        if "lower" in dv:
+            kwargs["lower"] = dv["lower"]
+        if "upper" in dv:
+            kwargs["upper"] = dv["upper"]
+        if "scaler" in dv:
+            kwargs["scaler"] = dv["scaler"]
+        prob.model.add_design_var(path, **kwargs)
+
+    # --- Constraints ---
+    for con in constraints:
+        con_name = con.get("name", "")
+        if con_name in _TOPLEVEL_CONSTRAINTS:
+            path = make_om_path(
+                PathKind.CONSTRAINT, con_name,
+                analysis_type="aerostruct",
+            )
+        else:
+            pt_idx = con.get("point", 0)
+            pt_name = point_names[pt_idx] if pt_idx < len(point_names) else point_names[0]
+            path = make_om_path(
+                PathKind.CONSTRAINT, con_name,
+                surface_name=primary_name, point_name=pt_name,
+                analysis_type="aerostruct",
+            )
+        kwargs = {}
+        if "equals" in con:
+            kwargs["equals"] = con["equals"]
+        if "lower" in con:
+            kwargs["lower"] = con["lower"]
+        if "upper" in con:
+            kwargs["upper"] = con["upper"]
+        prob.model.add_constraint(path, **kwargs)
+
+    # --- Objective ---
+    obj_path = make_om_path(
+        PathKind.OBJECTIVE, objective,
+        surface_name=primary_name, point_name=point_names[0],
+        analysis_type="aerostruct",
+    )
+    prob.model.add_objective(obj_path)
 
 
 def build_multipoint_optimization_problem(
@@ -663,14 +1023,24 @@ def build_multipoint_optimization_problem(
     point_mass_locations: list | None = None,
     tolerance: float = 1e-2,
     max_iterations: int = 200,
+    optimizer: str = "SLSQP",
+    solver_config: SolverConfig | None = None,
 ) -> tuple[om.Problem, list[str]]:
     """Build and set up a multipoint aerostructural optimisation problem.
 
-    Returns (prob, point_names).  The caller should call prob.run_driver().
+    Returns ``(prob, point_names)``.  The caller should call ``prob.run_driver()``.
+
+    Parameters
+    ----------
+    optimizer : str
+        SciPy optimizer name (default ``"SLSQP"``).
+    solver_config : SolverConfig or None
+        Solver settings for the coupled groups.  ``None`` applies the multipoint
+        default (Aitken-accelerated LinearBlockGS).
     """
     prob = om.Problem(reports=False)
     prob.driver = om.ScipyOptimizeDriver()
-    prob.driver.options["optimizer"] = "SLSQP"
+    prob.driver.options["optimizer"] = optimizer
     prob.driver.options["tol"] = tolerance
     prob.driver.options["maxiter"] = max_iterations
 
@@ -679,62 +1049,14 @@ def build_multipoint_optimization_problem(
         alpha, alpha_maneuver, empty_cg, fuel_mass, point_masses, point_mass_locations,
     )
 
-    validate_design_variables_for_surfaces(design_variables, surfaces)
-
-    primary_name = surfaces[0]["name"] if surfaces else "wing"
-
-    for dv in design_variables:
-        dv_name = dv.get("name", "")
-        template = DV_NAME_MAP.get(dv_name)
-        if template is None and dv_name.endswith("_cp"):
-            template = DV_NAME_MAP.get(dv_name[:-3])
-        if template is None:
-            raise ValueError(f"Unknown design variable {dv_name!r}. Options: {list(DV_NAME_MAP)}")
-        # Scalar DVs have literal paths; surface DVs need name/point substitution
-        path = template if dv_name in _MP_SCALAR_DVS else resolve_path(template, primary_name, point_names[0])
-        kwargs = {}
-        if "lower" in dv:
-            kwargs["lower"] = dv["lower"]
-        if "upper" in dv:
-            kwargs["upper"] = dv["upper"]
-        if "scaler" in dv:
-            kwargs["scaler"] = dv["scaler"]
-        prob.model.add_design_var(path, **kwargs)
-
-    for con in constraints:
-        con_name = con.get("name", "")
-        template = CONSTRAINT_NAME_MAP_AEROSTRUCT.get(con_name)
-        if template is None:
-            raise ValueError(f"Unknown constraint {con_name!r}. Options: {list(CONSTRAINT_NAME_MAP_AEROSTRUCT)}")
-        if con_name in _MP_TOPLEVEL_CONSTRAINTS:
-            path = template  # literal path, no substitution
-        else:
-            pt_idx = con.get("point", 0)
-            pt_name = point_names[pt_idx] if pt_idx < len(point_names) else point_names[0]
-            path = resolve_path(template, primary_name, pt_name)
-        kwargs = {}
-        if "equals" in con:
-            kwargs["equals"] = con["equals"]
-        if "lower" in con:
-            kwargs["lower"] = con["lower"]
-        if "upper" in con:
-            kwargs["upper"] = con["upper"]
-        prob.model.add_constraint(path, **kwargs)
-
-    obj_template = OBJECTIVE_MAP_AEROSTRUCT.get(objective)
-    if obj_template is None:
-        raise ValueError(f"Unknown objective {objective!r}. Options: {list(OBJECTIVE_MAP_AEROSTRUCT)}")
-    obj_path = resolve_path(obj_template, primary_name, point_names[0])
-    prob.model.add_objective(obj_path)
+    _add_multipoint_dvs_constraints_objective(
+        prob, surfaces, design_variables, constraints, objective, point_names,
+    )
 
     prob.setup(force_alloc_complex=False)
 
-    # Set Aitken-accelerated linear solver on each coupled group
-    for pt in point_names:
-        pt_group = getattr(prob.model, pt, None)
-        if pt_group is not None:
-            coupled = getattr(pt_group, "coupled", None)
-            if coupled is not None:
-                coupled.linear_solver = om.LinearBlockGS(iprint=0, maxiter=30, use_aitken=True)
+    # Apply solver configuration (default: Aitken-accelerated LBGS)
+    effective_config = solver_config if solver_config is not None else _MULTIPOINT_DEFAULT_SOLVER_CONFIG
+    _apply_solver_config(prob, point_names, effective_config)
 
     return prob, point_names

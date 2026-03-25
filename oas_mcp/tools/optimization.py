@@ -116,10 +116,7 @@ async def run_optimization(
     ct_val = CT if CT is not None else ct_default
 
     def _run():
-        from ..core.builders import (
-            DV_NAME_MAP, OBJECTIVE_MAP_AERO, OBJECTIVE_MAP_AEROSTRUCT,
-            _MP_SCALAR_DVS, resolve_path,
-        )
+        from ..core.builders import resolve_dv_paths, resolve_objective_path
         from ..core.convergence import OptimizationTracker
 
         primary_name = surface_dicts[0]["name"] if surface_dicts else "wing"
@@ -144,23 +141,15 @@ async def run_optimization(
                 max_iterations=max_iterations,
             )
 
-            dv_path_map: dict[str, str] = {}
-            for dv in design_variables:
-                dv_name = dv["name"]
-                template = DV_NAME_MAP.get(dv_name)
-                if template is None and dv_name.endswith("_cp"):
-                    template = DV_NAME_MAP.get(dv_name[:-3])
-                if template:
-                    path = (template if dv_name in _MP_SCALAR_DVS
-                            else resolve_path(template, primary_name, point_names[0]))
-                    dv_path_map[dv_name] = path
+            dv_path_map = resolve_dv_paths(
+                design_variables, primary_name, point_names[0], "aerostruct",
+            )
 
             tracker = OptimizationTracker()
             initial_dvs = tracker.record_initial(prob, dv_path_map)
             tracker.attach(prob)
 
-            obj_template = OBJECTIVE_MAP_AEROSTRUCT.get(objective)
-            obj_path = resolve_path(obj_template, primary_name, point_names[0]) if obj_template else ""
+            obj_path = resolve_objective_path(objective, primary_name, point_names[0], "aerostruct")
 
             prob.run_driver()
             success = prob.driver.result.success if hasattr(prob.driver, "result") else True
@@ -214,19 +203,15 @@ async def run_optimization(
                 max_iterations=max_iterations,
             )
 
-            dv_path_map = {}
-            for dv in design_variables:
-                template = DV_NAME_MAP.get(dv["name"])
-                if template:
-                    dv_path_map[dv["name"]] = resolve_path(template, primary_name, point_name)
+            dv_path_map = resolve_dv_paths(
+                design_variables, primary_name, point_name, analysis_type,
+            )
 
             tracker = OptimizationTracker()
             initial_dvs = tracker.record_initial(prob, dv_path_map)
             tracker.attach(prob)
 
-            obj_map = OBJECTIVE_MAP_AERO if analysis_type == "aero" else OBJECTIVE_MAP_AEROSTRUCT
-            obj_template = obj_map.get(objective)
-            obj_path = resolve_path(obj_template, primary_name, point_name) if obj_template else ""
+            obj_path = resolve_objective_path(objective, primary_name, point_name, analysis_type)
 
             prob.run_driver()
             success = prob.driver.result.success if hasattr(prob.driver, "result") else True
