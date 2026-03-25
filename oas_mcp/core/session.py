@@ -69,6 +69,8 @@ class SessionDefaults:
     telemetry_mode: str | None = None
     # "inline" (default) | "file" | "url" — controls what visualize() returns
     visualization_output: str = "inline"
+    # Max artifacts to keep per session (oldest pruned after each save). None = unlimited.
+    retention_max_count: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -77,6 +79,7 @@ class SessionDefaults:
             "auto_visualize": self.auto_visualize,
             "telemetry_mode": self.telemetry_mode,
             "visualization_output": self.visualization_output,
+            "retention_max_count": self.retention_max_count,
         }
 
 
@@ -240,7 +243,7 @@ class Session:
         valid_fields = {
             "default_detail_level", "validation_severity_threshold",
             "auto_visualize", "telemetry_mode", "project",
-            "visualization_output",
+            "visualization_output", "retention_max_count",
         }
         for key, value in kwargs.items():
             if key not in valid_fields:

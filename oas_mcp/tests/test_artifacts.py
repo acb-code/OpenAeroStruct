@@ -12,7 +12,7 @@ import json
 import numpy as np
 import pytest
 
-from oas_mcp.core.artifacts import ArtifactStore, _make_run_id
+from oas_mcp.core.artifacts import ARTIFACT_SCHEMA_VERSION, ArtifactStore, _make_run_id
 
 
 @pytest.fixture
@@ -379,3 +379,134 @@ def test_delete_scoped_to_user(store):
     assert store.delete(rid, user="bob") is False
     # artifact still exists for alice
     assert store.get(rid, user="alice") is not None
+
+
+# ---------------------------------------------------------------------------
+# artifact schema versioning
+# ---------------------------------------------------------------------------
+
+
+def test_save_includes_artifact_schema_version(store, tmp_path):
+    """Saved artifacts should contain artifact_schema_version at the top level."""
+    run_id = store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {"CL": 0.5})
+    with (tmp_path / "default" / "default" / "s1" / f"{run_id}.json").open() as f:
+        data = json.load(f)
+    assert data["artifact_schema_version"] == ARTIFACT_SCHEMA_VERSION
+
+
+def test_get_migrates_legacy_artifact(store, tmp_path):
+    """Artifacts written without artifact_schema_version should be treated as 1.0."""
+    # Manually write a legacy artifact (no version key)
+    session_dir = tmp_path / "default" / "default" / "s1"
+    session_dir.mkdir(parents=True)
+    run_id = "20260101T000000_legacy00000000"
+    legacy = {
+        "metadata": {
+            "run_id": run_id,
+            "session_id": "s1",
+            "user": "default",
+            "project": "default",
+            "analysis_type": "aero",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "surfaces": ["wing"],
+            "tool_name": "run_aero_analysis",
+            "parameters": {},
+        },
+        "results": {"CL": 0.42},
+    }
+    with (session_dir / f"{run_id}.json").open("w") as f:
+        json.dump(legacy, f)
+
+    artifact = store.get(run_id, session_id="s1")
+    assert artifact is not None
+    assert artifact["artifact_schema_version"] == "1.0"
+
+
+# ---------------------------------------------------------------------------
+# cleanup (retention policy)
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_max_count(store):
+    """cleanup with max_count should delete the oldest artifacts."""
+    ids = []
+    for i in range(5):
+        rid = store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {"i": i})
+        ids.append(rid)
+
+    deleted = store.cleanup("default", "default", "s1", max_count=3)
+    assert len(deleted) == 2
+    # Exactly 3 should remain
+    remaining = store.list(session_id="s1")
+    assert len(remaining) == 3
+    # Deleted and remaining should partition the original set
+    remaining_ids = {e["run_id"] for e in remaining}
+    assert remaining_ids | set(deleted) == set(ids)
+    assert remaining_ids & set(deleted) == set()
+
+
+def test_cleanup_noop_under_limit(store):
+    """cleanup should not delete anything when count is under the limit."""
+    for _ in range(2):
+        store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {})
+
+    deleted = store.cleanup("default", "default", "s1", max_count=5)
+    assert deleted == []
+    assert len(store.list(session_id="s1")) == 2
+
+
+def test_cleanup_returns_deleted_ids(store):
+    """cleanup should return the run_ids of deleted artifacts."""
+    r1 = store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {})
+    r2 = store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {})
+    r3 = store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {})
+
+    deleted = store.cleanup("default", "default", "s1", max_count=1)
+    assert len(deleted) == 2
+    # Exactly one should survive
+    all_ids = {r1, r2, r3}
+    survived = all_ids - set(deleted)
+    assert len(survived) == 1
+    # Deleted files are actually gone; survivor still exists
+    for rid in deleted:
+        assert store.get(rid) is None
+    for rid in survived:
+        assert store.get(rid) is not None
+
+
+def test_cleanup_max_age(store, tmp_path):
+    """cleanup with max_age_days=0 should delete all artifacts (they're all 'old')."""
+    r1 = store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {})
+    r2 = store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {})
+
+    # max_age_days=0 means cutoff = now, so all artifacts with timestamp < now are deleted
+    deleted = store.cleanup("default", "default", "s1", max_age_days=0)
+    assert len(deleted) == 2
+    assert store.list(session_id="s1") == []
+
+
+def test_cleanup_no_args_is_noop(store):
+    """cleanup with neither max_count nor max_age_days does nothing."""
+    store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {})
+    deleted = store.cleanup("default", "default", "s1")
+    assert deleted == []
+
+
+def test_cleanup_respects_protected_run_ids(store):
+    """Protected run_ids should never be deleted by cleanup."""
+    ids = []
+    for i in range(5):
+        rid = store.save("s1", "aero", "run_aero_analysis", ["wing"], {}, {"i": i})
+        ids.append(rid)
+
+    # Sort to know which are "oldest" by run_id
+    sorted_ids = sorted(ids)
+    # Protect the oldest run_id — it would normally be deleted
+    protected = {sorted_ids[0]}
+
+    deleted = store.cleanup("default", "default", "s1", max_count=3,
+                            protected_run_ids=protected)
+    assert sorted_ids[0] not in deleted  # protected, not deleted
+    assert len(deleted) == 2  # still deletes 2 to reach max_count=3
+    # Protected run still exists
+    assert store.get(sorted_ids[0], session_id="s1") is not None

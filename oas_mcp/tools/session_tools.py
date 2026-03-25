@@ -63,6 +63,12 @@ async def configure_session(
         "'file' = save PNG to disk only (no [image] noise in CLI), "
         "'url' = return dashboard/plot URLs (best for remote/VPS CLI)",
     ] = None,
+    retention_max_count: Annotated[
+        int | None,
+        "Maximum number of artifacts to keep per session. "
+        "Oldest artifacts are automatically deleted after each analysis when exceeded. "
+        "None = unlimited (default).",
+    ] = None,
 ) -> dict:
     """Configure per-session defaults to reduce repeated arguments.
 
@@ -126,6 +132,11 @@ async def configure_session(
                 "visualization_output must be 'inline', 'file', or 'url'"
             )
         updates["visualization_output"] = visualization_output
+
+    if retention_max_count is not None:
+        if retention_max_count < 1:
+            raise ValueError("retention_max_count must be >= 1")
+        updates["retention_max_count"] = retention_max_count
 
     if updates:
         session.configure(**updates)

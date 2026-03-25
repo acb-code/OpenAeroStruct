@@ -190,3 +190,14 @@ class TestSessionConfigure:
         session = Session()
         session.configure(project="my_project")
         assert session.project == "my_project"
+
+    def test_configure_sets_retention_max_count(self):
+        session = Session()
+        session.configure(retention_max_count=10)
+        assert session.defaults.retention_max_count == 10
+
+    def test_retention_max_count_in_to_dict(self):
+        session = Session()
+        session.configure(retention_max_count=5)
+        d = session.defaults.to_dict()
+        assert d["retention_max_count"] == 5

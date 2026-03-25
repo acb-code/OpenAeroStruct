@@ -209,6 +209,7 @@ async def _finalize_analysis(
     if conv_data:
         results_to_save["convergence"] = conv_data
 
+    user = get_current_user()
     _artifacts.save(
         session_id=session_id,
         analysis_type=analysis_type,
@@ -216,13 +217,23 @@ async def _finalize_analysis(
         surfaces=surfaces,
         parameters=inputs,
         results=results_to_save,
-        user=get_current_user(),
+        user=user,
         project=session.project,
         name=run_name,
         validation=validation,
         telemetry=telem,
         run_id=run_id,
     )
+
+    # Auto-prune oldest artifacts if retention limit is configured
+    if session.defaults.retention_max_count is not None:
+        _artifacts.cleanup(
+            user=user,
+            project=session.project,
+            session_id=session_id,
+            max_count=session.defaults.retention_max_count,
+            protected_run_ids=set(session._pinned),
+        )
 
     envelope = make_envelope(tool_name, run_id, inputs, results, validation, telem)
     if summary is not None:

@@ -18,7 +18,7 @@ import json
 import os
 import secrets
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,23 @@ import re
 import numpy as np
 
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-. ]+$")
+
+# Artifact schema version — stamped into every persisted artifact.
+# Bump when the on-disk artifact format changes; add a migration step
+# in _migrate_artifact() so older files are transparently upgraded on read.
+ARTIFACT_SCHEMA_VERSION = "1.0"
+
+
+def _migrate_artifact(artifact: dict) -> dict:
+    """Apply schema migrations to an artifact loaded from disk.
+
+    Artifacts written before versioning have no ``artifact_schema_version``
+    key and are treated as version ``"1.0"`` (the current format).
+    Future migrations would be chained here (1.0 → 1.1 → 1.2, etc.).
+    """
+    if "artifact_schema_version" not in artifact:
+        artifact["artifact_schema_version"] = "1.0"
+    return artifact
 
 
 def _validate_path_segment(value: str, label: str) -> None:
@@ -259,7 +276,11 @@ class ArtifactStore:
         if name is not None:
             metadata["name"] = name
 
-        artifact: dict[str, Any] = {"metadata": metadata, "results": results}
+        artifact: dict[str, Any] = {
+            "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+            "metadata": metadata,
+            "results": results,
+        }
         if validation is not None:
             artifact["validation"] = validation
         if telemetry is not None:
@@ -369,7 +390,7 @@ class ArtifactStore:
                 if path.exists():
                     try:
                         with path.open() as f:
-                            return json.load(f)
+                            return _migrate_artifact(json.load(f))
                     except (json.JSONDecodeError, OSError):
                         return None
         return None
@@ -409,3 +430,84 @@ class ArtifactStore:
                     self._save_index(u, p, s, index)
                     return True
         return False
+
+    def cleanup(
+        self,
+        user: str,
+        project: str,
+        session_id: str,
+        max_count: int | None = None,
+        max_age_days: int | None = None,
+        protected_run_ids: set[str] | None = None,
+    ) -> list[str]:
+        """Delete oldest artifacts exceeding retention limits.
+
+        Parameters
+        ----------
+        user, project, session_id:
+            Identify the session directory to clean up.
+        max_count:
+            Keep at most this many artifacts (newest first). Oldest are
+            deleted when the count is exceeded.
+        max_age_days:
+            Delete artifacts whose timestamp is older than this many days.
+        protected_run_ids:
+            Run IDs that must never be deleted (e.g. pinned runs).
+
+        Returns
+        -------
+        list[str]
+            Run IDs of deleted artifacts.
+        """
+        if max_count is None and max_age_days is None:
+            return []
+
+        protected = protected_run_ids or set()
+
+        with self._lock:
+            index = self._load_index(user, project, session_id)
+            if not index:
+                return []
+
+            # Sort oldest-first by run_id (chronologically sortable prefix)
+            index.sort(key=lambda e: e.get("run_id", ""))
+
+            to_delete: list[str] = []
+
+            # --- age-based deletion ---
+            if max_age_days is not None:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+                cutoff_iso = cutoff.isoformat()
+                for entry in index:
+                    rid = entry["run_id"]
+                    ts = entry.get("timestamp", "")
+                    if ts and ts < cutoff_iso and rid not in protected:
+                        to_delete.append(rid)
+
+            # --- count-based deletion ---
+            if max_count is not None and max_count >= 0:
+                # After removing age-expired, compute how many remain
+                remaining = [e for e in index if e["run_id"] not in set(to_delete)]
+                excess = len(remaining) - max_count
+                if excess > 0:
+                    # Delete the oldest excess entries, skipping protected
+                    for entry in remaining:
+                        if excess <= 0:
+                            break
+                        rid = entry["run_id"]
+                        if rid not in protected and rid not in set(to_delete):
+                            to_delete.append(rid)
+                            excess -= 1
+
+            # Perform deletions
+            delete_set = set(to_delete)
+            for rid in to_delete:
+                path = self._artifact_path(user, project, session_id, rid)
+                if path.exists():
+                    path.unlink()
+
+            if to_delete:
+                index = [e for e in index if e["run_id"] not in delete_set]
+                self._save_index(user, project, session_id, index)
+
+            return to_delete
