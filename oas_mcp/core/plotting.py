@@ -320,11 +320,10 @@ def plot_drag_polar(run_id: str, results: dict, case_name: str = "", *, save_dir
 
 
 def plot_stress_distribution(run_id: str, results: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
-    """Plot spanwise von Mises stress with yield stress reference line.
+    """Plot spanwise stress with failure reference line.
 
-    Looks for per-surface ``sectional_data.vonmises_MPa`` and
-    ``sectional_data.yield_stress_MPa``.  Falls back to scalar
-    ``max_vonmises_Pa`` if the per-element array is unavailable.
+    Handles both isotropic (von Mises) and composite (Tsai-Wu SR) surfaces.
+    Falls back to scalar metrics when per-element arrays are unavailable.
     """
     _require_mpl()
     import matplotlib.pyplot as plt
@@ -334,64 +333,120 @@ def plot_stress_distribution(run_id: str, results: dict, case_name: str = "", *,
     fig.suptitle(f"{title}\n(run_id: {run_id})", fontsize=9, y=0.98)
 
     def _elem_y(y_nodes: list, n_elem: int) -> list | None:
-        """Map nodal y_span_norm to element midpoints.
-
-        OAS stores stress/failure per beam element (ny-1 values) while
-        y_span_norm comes from the ny mesh nodes.  Average adjacent nodes
-        to get the element-centre η coordinate.
-        """
+        """Map nodal y_span_norm to element midpoints."""
         if len(y_nodes) == n_elem:
             return y_nodes
         if len(y_nodes) == n_elem + 1:
             return [(y_nodes[i] + y_nodes[i + 1]) / 2.0 for i in range(n_elem)]
         return None
 
+    # Detect material models across surfaces
+    has_composite = False
+    has_isotropic = False
+    for surf_res in results.get("surfaces", {}).values():
+        sectional = surf_res.get("sectional_data", {})
+        if sectional.get("material_model") == "composite":
+            has_composite = True
+        else:
+            has_isotropic = True
+
+    # Choose plot mode: pure isotropic, pure composite, or mixed (utilization ratio)
+    mixed = has_composite and has_isotropic
+
     plotted = False
-    max_yield = 0.0
+    max_ref = 0.0  # max reference line value for y-limit
 
     for surf_name, surf_res in results.get("surfaces", {}).items():
         sectional = surf_res.get("sectional_data", {})
         y_nodes = sectional.get("y_span_norm")
-        vm = sectional.get("vonmises_MPa")
+        mat_model = sectional.get("material_model", "isotropic")
 
-        if y_nodes and vm:
-            y_vm = _elem_y(y_nodes, len(vm))
-            if y_vm is not None:
-                ax.plot(y_vm, vm, label=surf_name, linewidth=2)
+        if mat_model == "composite":
+            sr = sectional.get("tsaiwu_sr_max")
+            sf = sectional.get("safety_factor", 2.5)
+
+            if y_nodes and sr:
+                y_sr = _elem_y(y_nodes, len(sr))
+                if y_sr is not None:
+                    if mixed:
+                        # Plot as utilization ratio: SR * SF
+                        vals = [s * sf for s in sr]
+                        ax.plot(y_sr, vals, label=f"{surf_name} (composite)", linewidth=2)
+                    else:
+                        ax.plot(y_sr, sr, label=surf_name, linewidth=2)
+                    plotted = True
+            elif surf_res.get("max_tsaiwu_sr") is not None:
+                val = surf_res["max_tsaiwu_sr"]
+                if mixed:
+                    val = val * sf
+                ax.axhline(val, linestyle="--",
+                           label=f"{surf_name} max SR={surf_res['max_tsaiwu_sr']:.4f}",
+                           linewidth=1.5)
                 plotted = True
+
+            # Failure threshold
+            if mixed:
+                ref = 1.0  # utilization ratio threshold
+            else:
+                ref = 1.0 / sf  # SR failure threshold
+            if ref > max_ref:
+                ax.axhline(ref, color="r", linewidth=2, linestyle="--")
+                max_ref = ref
+
+        else:
+            # Isotropic (von Mises)
+            vm = sectional.get("vonmises_MPa")
+            yield_mpa = sectional.get("yield_stress_MPa")
+            sf = sectional.get("safety_factor", 1.0)
+
+            if y_nodes and vm:
+                y_vm = _elem_y(y_nodes, len(vm))
+                if y_vm is not None:
+                    if mixed:
+                        # Normalize to utilization ratio: VM / allowable
+                        allowable = yield_mpa / sf if yield_mpa else 1.0
+                        vals = [v / allowable for v in vm]
+                        ax.plot(y_vm, vals, label=f"{surf_name} (isotropic)", linewidth=2)
+                    else:
+                        ax.plot(y_vm, vm, label=surf_name, linewidth=2)
+                    plotted = True
+                else:
+                    max_vm = surf_res.get("max_vonmises_Pa")
+                    if max_vm is not None:
+                        ax.axhline(max_vm / 1e6, linestyle="--",
+                                   label=f"{surf_name} max={max_vm/1e6:.1f} MPa",
+                                   linewidth=1.5)
+                        plotted = True
             else:
                 max_vm = surf_res.get("max_vonmises_Pa")
                 if max_vm is not None:
-                    ax.axhline(
-                        max_vm / 1e6, linestyle="--",
-                        label=f"{surf_name} max={max_vm/1e6:.1f} MPa",
-                        linewidth=1.5,
-                    )
+                    ax.axhline(max_vm / 1e6, linestyle="--",
+                               label=f"{surf_name} max={max_vm/1e6:.1f} MPa",
+                               linewidth=1.5)
                     plotted = True
-        else:
-            max_vm = surf_res.get("max_vonmises_Pa")
-            if max_vm is not None:
-                ax.axhline(
-                    max_vm / 1e6, linestyle="--",
-                    label=f"{surf_name} max={max_vm/1e6:.1f} MPa",
-                    linewidth=1.5,
-                )
-                plotted = True
 
-        # Allowable stress reference line (yield / safety_factor)
-        yield_mpa = sectional.get("yield_stress_MPa")
-        sf = sectional.get("safety_factor", 1.0)
-        if yield_mpa is not None:
-            allowable_mpa = yield_mpa / sf
-            ax.axhline(allowable_mpa, color="r", linewidth=2, linestyle="--")
-            max_yield = max(max_yield, allowable_mpa)
+            # Allowable stress reference line
+            if yield_mpa is not None and not mixed:
+                allowable_mpa = yield_mpa / sf
+                ax.axhline(allowable_mpa, color="r", linewidth=2, linestyle="--")
+                max_ref = max(max_ref, allowable_mpa)
+            elif mixed:
+                if 1.0 > max_ref:
+                    ax.axhline(1.0, color="r", linewidth=2, linestyle="--")
+                    max_ref = 1.0
 
-    if max_yield > 0:
-        ax.set_ylim([0, max_yield * 1.1])
+    if max_ref > 0:
+        ax.set_ylim([0, max_ref * 1.1])
         ax.text(0.075, 1.03, "failure limit", transform=ax.transAxes, color="r", fontsize=8)
 
     ax.set_xlabel("Normalised spanwise station η  [—]   (0 = root, 1 = tip)")
-    ax.set_ylabel("von Mises stress  [MPa]")
+    if mixed:
+        ax.set_ylabel("Strength Utilisation Ratio  [—]")
+    elif has_composite:
+        ax.set_ylabel("Tsai-Wu Strength Ratio  [—]")
+    else:
+        ax.set_ylabel("von Mises stress  [MPa]")
+
     if plotted:
         ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3)

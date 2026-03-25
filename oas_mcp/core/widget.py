@@ -184,7 +184,10 @@ def _extract_drag_polar(results: dict) -> dict:
 
 
 def _extract_stress_distribution(results: dict) -> dict:
-    """Extract spanwise von Mises stress with yield reference for Plotly."""
+    """Extract spanwise stress data with failure reference for Plotly.
+
+    Handles isotropic (von Mises) and composite (Tsai-Wu SR) surfaces.
+    """
     traces = []
 
     def _elem_y(y_nodes: list, n_elem: int) -> list | None:
@@ -194,47 +197,74 @@ def _extract_stress_distribution(results: dict) -> dict:
             return [(y_nodes[i] + y_nodes[i + 1]) / 2.0 for i in range(n_elem)]
         return None
 
-    max_yield = 0.0
+    max_ref = 0.0
+    has_composite = False
+    has_isotropic = False
+
     for surf_name, surf_res in results.get("surfaces", {}).items():
         sectional = surf_res.get("sectional_data", {})
         y_nodes = sectional.get("y_span_norm")
-        vm = sectional.get("vonmises_MPa")
+        mat_model = sectional.get("material_model", "isotropic")
 
-        if y_nodes and vm:
-            y_vm = _elem_y(y_nodes, len(vm))
-            if y_vm is not None:
-                traces.append({
-                    "kind": "scatter",
-                    "x": list(y_vm),
-                    "y": list(vm),
-                    "name": f"{surf_name} von Mises [MPa]",
-                    "mode": "lines+markers",
-                })
+        if mat_model == "composite":
+            has_composite = True
+            sr = sectional.get("tsaiwu_sr_max")
+            sf = sectional.get("safety_factor", 2.5)
+            if y_nodes and sr:
+                y_sr = _elem_y(y_nodes, len(sr))
+                if y_sr is not None:
+                    traces.append({
+                        "kind": "scatter",
+                        "x": list(y_sr),
+                        "y": list(sr),
+                        "name": f"{surf_name} Tsai-Wu SR",
+                        "mode": "lines+markers",
+                    })
+            ref = 1.0 / sf
+            max_ref = max(max_ref, ref)
+        else:
+            has_isotropic = True
+            vm = sectional.get("vonmises_MPa")
+            if y_nodes and vm:
+                y_vm = _elem_y(y_nodes, len(vm))
+                if y_vm is not None:
+                    traces.append({
+                        "kind": "scatter",
+                        "x": list(y_vm),
+                        "y": list(vm),
+                        "name": f"{surf_name} von Mises [MPa]",
+                        "mode": "lines+markers",
+                    })
+            yield_mpa = sectional.get("yield_stress_MPa")
+            sf = sectional.get("safety_factor", 1.0)
+            if yield_mpa is not None:
+                max_ref = max(max_ref, yield_mpa / sf)
 
-        # Allowable stress reference line (yield / safety_factor)
-        yield_mpa = sectional.get("yield_stress_MPa")
-        sf = sectional.get("safety_factor", 1.0)
-        if yield_mpa is not None:
-            max_yield = max(max_yield, yield_mpa / sf)
-
-    if max_yield > 0:
+    if max_ref > 0:
         traces.append({
             "kind": "hline",
-            "y": max_yield,
+            "y": max_ref,
             "name": "failure limit",
             "line": {"color": "red", "dash": "dash", "width": 2},
         })
+
+    if has_composite and not has_isotropic:
+        yaxis_title = "Tsai-Wu Strength Ratio  [—]"
+    elif has_composite and has_isotropic:
+        yaxis_title = "Strength Utilisation Ratio  [—]"
+    else:
+        yaxis_title = "von Mises stress  [MPa]"
 
     layout: dict = {
         "type": "stress_distribution",
         "interactive": True,
         "traces": traces,
         "xaxis": {"title": "Normalised spanwise station η  [—]  (0=root, 1=tip)"},
-        "yaxis": {"title": "von Mises stress  [MPa]"},
+        "yaxis": {"title": yaxis_title},
         "title": "Stress Distribution",
     }
-    if max_yield > 0:
-        layout["yaxis"]["range"] = [0, max_yield * 1.1]
+    if max_ref > 0:
+        layout["yaxis"]["range"] = [0, max_ref * 1.1]
     return layout
 
 

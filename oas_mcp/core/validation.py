@@ -353,29 +353,42 @@ def validate_aerostruct(results: dict, context: dict | None = None) -> list[Vali
         ))
 
     # Per-surface structural failure checks
+    surfaces_by_name = {
+        s["name"]: s for s in ctx.get("surfaces", []) if isinstance(s, dict)
+    }
     for surf_name, surf_res in results.get("surfaces", {}).items():
         failure = surf_res.get("failure")
         if failure is not None:
-            # failure > 1.0 means the structure has failed
-            # (failure is a utilization ratio; 1.0 = at yield)
             struct_failed = failure > 1.0
+            is_composite = surf_res.get(
+                "material_model", surfaces_by_name.get(surf_name, {}).get("useComposite", False)
+            ) == "composite" or surfaces_by_name.get(surf_name, {}).get("useComposite", False)
+
+            if struct_failed:
+                if is_composite:
+                    fail_msg = f"Surface '{surf_name}': failure index = {failure:.4f} > 1.0 — Tsai-Wu FAILURE"
+                    fail_rem = (
+                        "Tsai-Wu failure criterion exceeded. "
+                        "Increase skin/spar thickness, adjust ply layup (angles/fractions), or reduce load factor."
+                    )
+                else:
+                    fail_msg = f"Surface '{surf_name}': failure index = {failure:.4f} > 1.0 — STRUCTURAL FAILURE"
+                    fail_rem = (
+                        "failure > 1 means von Mises stress exceeds yield/safety_factor. "
+                        "Increase thickness, reduce load factor, or choose a stronger material."
+                    )
+            else:
+                fail_msg = f"Surface '{surf_name}': failure index = {failure:.4f} ≤ 1.0 ✓ (structure intact)"
+                fail_rem = ""
+
             findings.append(ValidationFinding(
                 check_id=f"constraints.structural_failure.{surf_name}",
                 category="constraints",
                 severity="error" if struct_failed else "info",
                 confidence="high",
                 passed=not struct_failed,
-                message=(
-                    f"Surface '{surf_name}': failure index = {failure:.4f} ≤ 1.0 ✓ (structure intact)"
-                    if not struct_failed
-                    else f"Surface '{surf_name}': failure index = {failure:.4f} > 1.0 — STRUCTURAL FAILURE"
-                ),
-                remediation=(
-                    "failure > 1 means von Mises stress exceeds yield/safety_factor. "
-                    "Increase thickness, reduce load factor, or choose a stronger material."
-                    if struct_failed
-                    else ""
-                ),
+                message=fail_msg,
+                remediation=fail_rem,
             ))
 
     # Fuel burn sanity (if present)

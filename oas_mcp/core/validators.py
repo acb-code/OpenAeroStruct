@@ -132,6 +132,84 @@ def validate_safe_name(value: str, label: str) -> None:
         )
 
 
+def validate_composite_params(
+    fem_model_type: str | None,
+    ply_angles: list[float] | None,
+    ply_fractions: list[float] | None,
+    E1: float | None,
+    E2: float | None,
+    nu12: float | None,
+    G12: float | None,
+    sigma_t1: float | None,
+    sigma_c1: float | None,
+    sigma_t2: float | None,
+    sigma_c2: float | None,
+    sigma_12max: float | None,
+) -> list[float]:
+    """Validate composite material parameters and return normalised ply_fractions.
+
+    Raises ``ValueError`` with a descriptive message on invalid input.
+    Returns *ply_fractions* normalised to sum exactly to 1.0 (avoids
+    float-precision failures inside OAS's ``compute_composite_stiffness``).
+    """
+    if fem_model_type != "wingbox":
+        raise ValueError(
+            f"Composite materials require fem_model_type='wingbox', "
+            f"got {fem_model_type!r}. Tube models do not support composites."
+        )
+
+    # Check all required params are provided
+    required = {
+        "ply_angles": ply_angles,
+        "ply_fractions": ply_fractions,
+        "E1": E1,
+        "E2": E2,
+        "nu12": nu12,
+        "G12": G12,
+        "sigma_t1": sigma_t1,
+        "sigma_c1": sigma_c1,
+        "sigma_t2": sigma_t2,
+        "sigma_c2": sigma_c2,
+        "sigma_12max": sigma_12max,
+    }
+    missing = [k for k, v in required.items() if v is None]
+    if missing:
+        raise ValueError(
+            f"Composite material requires all properties. Missing: {missing}"
+        )
+
+    # Ply array checks
+    if len(ply_angles) == 0:
+        raise ValueError("ply_angles must contain at least one ply")
+    if len(ply_angles) != len(ply_fractions):
+        raise ValueError(
+            f"ply_angles ({len(ply_angles)} plies) and ply_fractions "
+            f"({len(ply_fractions)} values) must have the same length"
+        )
+    frac_sum = sum(ply_fractions)
+    if abs(frac_sum - 1.0) > 0.01:
+        raise ValueError(
+            f"ply_fractions must sum to 1.0 (got {frac_sum:.6f}). "
+            f"Tolerance is ±1%."
+        )
+
+    # Positive material properties
+    for name, val in [
+        ("E1", E1), ("E2", E2), ("G12", G12),
+        ("sigma_t1", sigma_t1), ("sigma_c1", sigma_c1),
+        ("sigma_t2", sigma_t2), ("sigma_c2", sigma_c2),
+        ("sigma_12max", sigma_12max),
+    ]:
+        if val <= 0:
+            raise ValueError(f"{name} must be positive, got {val}")
+    if nu12 < 0 or nu12 >= 1.0:
+        raise ValueError(f"nu12 must be in [0, 1), got {nu12}")
+
+    # Normalise fractions to sum exactly to 1.0 to avoid OAS strict check
+    normalised = [f / frac_sum for f in ply_fractions]
+    return normalised
+
+
 def validate_struct_props_present(surface: dict) -> None:
     """Ensure structural properties are present for aerostruct analysis."""
     required = ["E", "G", "yield", "mrho", "fem_model_type"]

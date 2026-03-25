@@ -189,7 +189,7 @@ async def run_aerostruct_analysis(
         "reynolds_number": reynolds_number, "density": density,
         "W0": W0, "R": R, "speed_of_sound": speed_of_sound, "load_factor": load_factor,
     }
-    findings = validate_aerostruct(results, context={"alpha": alpha, "W0": W0})
+    findings = validate_aerostruct(results, context={"alpha": alpha, "W0": W0, "surfaces": surface_dicts})
     return await _finalize_analysis(
         tool_name="run_aerostruct_analysis", run_id=run_id,
         session=session, session_id=session_id, surfaces=surfaces,

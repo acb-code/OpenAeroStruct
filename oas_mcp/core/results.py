@@ -110,16 +110,27 @@ def extract_aerostruct_results(
             if v is not None:
                 surf_res[key] = float(np.asarray(v).ravel()[0])
 
-        # Structural failure metric
+        # Structural failure metric (works for both isotropic and composite)
         failure = _try_get(prob, f"{perf}.failure")
         if failure is not None:
             surf_res["failure"] = _scalar(failure)
 
-        # Von Mises stress
-        vonmises = _try_get(prob, f"{perf}.vonmises")
-        if vonmises is not None:
-            vm_arr = np.asarray(vonmises).ravel()
-            surf_res["max_vonmises_Pa"] = float(vm_arr.max())
+        # Material model and stress metric
+        is_composite = surface.get("useComposite", False)
+        surf_res["material_model"] = "composite" if is_composite else "isotropic"
+
+        if is_composite:
+            # Tsai-Wu strength ratio (composite)
+            tsaiwu = _try_get(prob, f"{perf}.tsaiwu_sr")
+            if tsaiwu is not None:
+                sr_arr = np.asarray(tsaiwu).ravel()
+                surf_res["max_tsaiwu_sr"] = float(sr_arr.max())
+        else:
+            # Von Mises stress (isotropic)
+            vonmises = _try_get(prob, f"{perf}.vonmises")
+            if vonmises is not None:
+                vm_arr = np.asarray(vonmises).ravel()
+                surf_res["max_vonmises_Pa"] = float(vm_arr.max())
 
         # Structural mass from geometry group
         sm = _try_get(prob, f"{name}.structural_mass")
@@ -250,42 +261,62 @@ def extract_standard_detail(
             sect["lift_elliptical"] = lift_ell.tolist()
 
         # -------------------------------------------------------------------
-        # Spanwise von Mises stress (aerostruct only)
+        # Spanwise stress / strength (aerostruct only)
         # -------------------------------------------------------------------
         if analysis_type == "aerostruct":
-            vm_path = f"{perf}.vonmises"
-            vm_val = _try_get(prob, vm_path)
-            if vm_val is not None:
-                vm_2d = np.asarray(vm_val)
-                # vonmises shape: (ny-1, 2) for tube, (ny-1, 4) for wingbox.
-                # Take max over the last dimension to get peak stress per element.
-                if vm_2d.ndim >= 2:
-                    vm_per_elem = vm_2d.max(axis=-1).ravel()
-                else:
-                    vm_per_elem = vm_2d.ravel()
-                if len(vm_per_elem) > 1:
-                    # Reverse to match sorted y_span_norm (root→tip)
-                    sect["vonmises_MPa"] = (vm_per_elem[::-1] / 1e6).tolist()
-
-            # Store yield stress for plotting (yield line reference)
-            yield_stress = surface.get("yield", 500e6)
+            is_composite = surface.get("useComposite", False)
+            sect["material_model"] = "composite" if is_composite else "isotropic"
             safety_factor = surface.get("safety_factor", 2.5)
-            sect["yield_stress_MPa"] = yield_stress / 1e6
             sect["safety_factor"] = safety_factor
 
-            # Failure index distribution (per element)
-            fi_path = f"{perf}.failure"
-            fi_val = _try_get(prob, fi_path)
-            if fi_val is not None:
-                fi_arr = np.asarray(fi_val).ravel()
-                if len(fi_arr) > 1:
-                    sect["failure_index"] = fi_arr[::-1].tolist()
-                elif "vonmises_MPa" in sect:
-                    # FailureKS returns a scalar; derive per-element failure index
-                    # from vonmises: failure_i = vm / sigma_allow - 1
-                    sigma_allow = yield_stress / safety_factor
-                    vm_pa = np.array(sect["vonmises_MPa"]) * 1e6
-                    sect["failure_index"] = (vm_pa / sigma_allow - 1.0).tolist()
+            if is_composite:
+                # Tsai-Wu strength ratio — shape (ny-1, 4*num_plies)
+                sr_path = f"{perf}.tsaiwu_sr"
+                sr_val = _try_get(prob, sr_path)
+                if sr_val is not None:
+                    sr_2d = np.asarray(sr_val)
+                    # Max over plies & critical points per element
+                    if sr_2d.ndim >= 2:
+                        sr_per_elem = sr_2d.max(axis=-1).ravel()
+                    else:
+                        sr_per_elem = sr_2d.ravel()
+                    if len(sr_per_elem) > 1:
+                        sect["tsaiwu_sr_max"] = sr_per_elem[::-1].tolist()
+
+                # Failure index: SR * safety_factor - 1  (>0 = failed)
+                if "tsaiwu_sr_max" in sect:
+                    sect["failure_index"] = [
+                        sr * safety_factor - 1.0 for sr in sect["tsaiwu_sr_max"]
+                    ]
+            else:
+                # Von Mises stress (isotropic)
+                vm_path = f"{perf}.vonmises"
+                vm_val = _try_get(prob, vm_path)
+                if vm_val is not None:
+                    vm_2d = np.asarray(vm_val)
+                    # vonmises shape: (ny-1, 2) for tube, (ny-1, 4) for wingbox.
+                    if vm_2d.ndim >= 2:
+                        vm_per_elem = vm_2d.max(axis=-1).ravel()
+                    else:
+                        vm_per_elem = vm_2d.ravel()
+                    if len(vm_per_elem) > 1:
+                        sect["vonmises_MPa"] = (vm_per_elem[::-1] / 1e6).tolist()
+
+                yield_stress = surface.get("yield", 500e6)
+                sect["yield_stress_MPa"] = yield_stress / 1e6
+
+                # Failure index distribution (per element)
+                fi_path = f"{perf}.failure"
+                fi_val = _try_get(prob, fi_path)
+                if fi_val is not None:
+                    fi_arr = np.asarray(fi_val).ravel()
+                    if len(fi_arr) > 1:
+                        sect["failure_index"] = fi_arr[::-1].tolist()
+                    elif "vonmises_MPa" in sect:
+                        # FailureKS returns a scalar; derive per-element
+                        sigma_allow = yield_stress / safety_factor
+                        vm_pa = np.array(sect["vonmises_MPa"]) * 1e6
+                        sect["failure_index"] = (vm_pa / sigma_allow - 1.0).tolist()
 
             # Deformed mesh for 3D overlay (aerostruct only)
             def_mesh_path = f"{point_name}.coupled.{name}.def_mesh"

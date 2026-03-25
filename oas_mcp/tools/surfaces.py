@@ -15,6 +15,7 @@ from ..core.defaults import (
 )
 from ..core.mesh import apply_dihedral, apply_sweep, apply_taper, build_mesh
 from ..core.validators import (
+    validate_composite_params,
     validate_fem_model_type,
     validate_mesh_params,
     validate_wing_type,
@@ -60,6 +61,18 @@ async def create_surface(
     fuel_density: Annotated[float, "Fuel density in kg/m^3 (needed for fuel volume constraint)"] = 803.0,
     Wf_reserve: Annotated[float, "Reserve fuel mass in kg (subtracted from fuel volume constraint)"] = 15000.0,
     n_point_masses: Annotated[int, "Number of point masses (e.g. engines) attached to this surface"] = 0,
+    use_composite: Annotated[bool, "Enable composite laminate model with Tsai-Wu failure (requires fem_model_type='wingbox')"] = False,
+    ply_angles: Annotated[list[float] | None, "Ply orientation angles in degrees (e.g. [0, 45, -45, 90])"] = None,
+    ply_fractions: Annotated[list[float] | None, "Volume fraction of each ply (must sum to 1.0)"] = None,
+    E1: Annotated[float | None, "Longitudinal modulus of elasticity in Pa (fiber direction)"] = None,
+    E2: Annotated[float | None, "Transverse modulus of elasticity in Pa"] = None,
+    nu12: Annotated[float | None, "Major Poisson's ratio (fiber direction)"] = None,
+    G12: Annotated[float | None, "In-plane shear modulus in Pa"] = None,
+    sigma_t1: Annotated[float | None, "Longitudinal tensile strength in Pa"] = None,
+    sigma_c1: Annotated[float | None, "Longitudinal compressive strength in Pa"] = None,
+    sigma_t2: Annotated[float | None, "Transverse tensile strength in Pa"] = None,
+    sigma_c2: Annotated[float | None, "Transverse compressive strength in Pa"] = None,
+    sigma_12max: Annotated[float | None, "Maximum shear strength in Pa"] = None,
     num_twist_cp: Annotated[int | None, "Number of twist control points for CRM/uCRM_based mesh generation (None = auto)"] = None,
     session_id: Annotated[str, "Session identifier"] = "default",
 ) -> dict:
@@ -76,6 +89,15 @@ async def create_surface(
         raise ValueError(f"root_chord must be positive, got {root_chord}")
     if span <= 0:
         raise ValueError(f"span must be positive, got {span}")
+
+    # Validate and normalise composite params early (before expensive mesh build)
+    normalised_ply_fractions = None
+    if use_composite:
+        normalised_ply_fractions = validate_composite_params(
+            fem_model_type, ply_angles, ply_fractions,
+            E1, E2, nu12, G12,
+            sigma_t1, sigma_c1, sigma_t2, sigma_c2, sigma_12max,
+        )
 
     def _build():
         mesh, crm_twist = build_mesh(
@@ -177,6 +199,25 @@ async def create_surface(
                     n_cp = max(3, min(5, ny2 // 2))
                     surface["thickness_cp"] = np.ones(n_cp) * 0.1 * root_chord
 
+            # Composite laminate properties
+            if use_composite:
+                from openaerostruct.structures.utils import compute_composite_stiffness
+
+                surface["useComposite"] = True
+                surface["ply_angles"] = ply_angles
+                surface["ply_fractions"] = normalised_ply_fractions
+                surface["E1"] = E1
+                surface["E2"] = E2
+                surface["nu12"] = nu12
+                surface["G12"] = G12
+                surface["sigma_t1"] = sigma_t1
+                surface["sigma_c1"] = sigma_c1
+                surface["sigma_t2"] = sigma_t2
+                surface["sigma_c2"] = sigma_c2
+                surface["sigma_12max"] = sigma_12max
+                # Compute effective E and G from laminate theory (overwrites E/G in-place)
+                compute_composite_stiffness(surface)
+
         return surface
 
     session = _sessions.get(session_id)
@@ -193,7 +234,7 @@ async def create_surface(
     # Rough panel area estimate
     chord_avg = float(np.mean(mesh[-1, :, 0] - mesh[0, :, 0]))
 
-    return {
+    result = {
         "surface_name": name,
         "mesh_shape": [nx, ny, 3],
         "span_m": round(actual_span, 4),
@@ -201,6 +242,11 @@ async def create_surface(
         "estimated_area_m2": round(actual_span * chord_avg / (2.0 if symmetry else 1.0), 4),
         "twist_cp_shape": list(surface["twist_cp"].shape),
         "has_structure": fem_model_type is not None and fem_model_type != "none",
+        "use_composite": use_composite,
         "session_id": session_id,
         "status": "Surface created successfully",
     }
+    if use_composite:
+        result["effective_E"] = float(surface["E"])
+        result["effective_G"] = float(surface["G"])
+    return result
