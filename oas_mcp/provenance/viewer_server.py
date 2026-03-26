@@ -29,11 +29,14 @@ _DEFAULT_PORT = 7654
 
 # Maps analysis_type to applicable plot types (for /plot_types endpoint)
 ANALYSIS_PLOT_TYPES: dict[str, list[str]] = {
-    "aero":         ["lift_distribution", "planform"],
-    "aerostruct":   ["lift_distribution", "stress_distribution", "planform"],
+    "aero":         ["lift_distribution", "planform", "mesh_3d", "twist_chord_overlay"],
+    "aerostruct":   ["lift_distribution", "stress_distribution", "planform", "mesh_3d",
+                     "failure_heatmap", "deflection_profile", "twist_chord_overlay",
+                     "weight_breakdown"],
     "drag_polar":   ["drag_polar"],
     "stability":    ["lift_distribution"],
-    "optimization": ["opt_history", "opt_dv_evolution", "opt_comparison", "planform"],
+    "optimization": ["opt_history", "opt_dv_evolution", "opt_comparison", "planform",
+                     "mesh_3d", "twist_chord_overlay"],
 }
 
 

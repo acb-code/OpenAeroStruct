@@ -127,7 +127,10 @@ OBSERVABILITY TOOLS:
   • get_detailed_results(run_id, lvl)  — "standard" = sectional data; "full" = raw arrays
   • visualize(run_id, plot_type)       — ImageContent: lift_distribution, drag_polar,
                                          stress_distribution, convergence, planform,
-                                         opt_history, opt_dv_evolution, opt_comparison
+                                         opt_history, opt_dv_evolution, opt_comparison,
+                                         deflection_profile, weight_breakdown,
+                                         failure_heatmap, twist_chord_overlay,
+                                         mesh_3d, multipoint_comparison
   • get_last_logs(run_id)              — server-side log records for debugging
   • configure_session(session_id, ...) — set per-session defaults (detail level, auto-plots, etc.)
 

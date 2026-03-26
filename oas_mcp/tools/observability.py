@@ -195,7 +195,9 @@ async def visualize(
     plot_type: Annotated[
         str,
         "Plot type — one of: lift_distribution, drag_polar, stress_distribution, "
-        "convergence, planform, opt_history, opt_dv_evolution, opt_comparison, n2",
+        "convergence, planform, opt_history, opt_dv_evolution, opt_comparison, n2, "
+        "deflection_profile, weight_breakdown, failure_heatmap, twist_chord_overlay, "
+        "mesh_3d, multipoint_comparison",
     ],
     session_id: Annotated[str | None, "Session hint for faster artifact lookup"] = None,
     case_name: Annotated[str, "Human-readable label for the plot title"] = "",
@@ -217,15 +219,21 @@ async def visualize(
     there is no need to re-render.
 
     Available plot types:
-      lift_distribution   — spanwise Cl bar chart or per-surface CL
-      drag_polar          — CL vs CD and L/D vs alpha (requires drag polar run)
-      stress_distribution — spanwise von Mises stress and failure index
-      convergence         — solver residual history (if captured)
-      planform            — wing planform top view with optional deflection overlay
-      opt_history         — optimizer objective convergence (optimization runs only)
-      opt_dv_evolution    — design variable evolution over iterations (optimization only)
-      opt_comparison      — before/after DV comparison: initial vs optimized values
-      n2                  — interactive N2/DSM diagram (saves HTML to disk, returns metadata with file_path)
+      lift_distribution       — spanwise Cl bar chart or per-surface CL
+      drag_polar              — CL vs CD and L/D vs alpha (requires drag polar run)
+      stress_distribution     — spanwise von Mises stress and failure index
+      convergence             — solver residual history (if captured)
+      planform                — wing planform top view with optional deflection overlay
+      opt_history             — optimizer objective convergence (optimization runs only)
+      opt_dv_evolution        — design variable evolution over iterations (optimization only)
+      opt_comparison          — before/after DV comparison: initial vs optimized values
+      n2                      — interactive N2/DSM diagram (saves HTML to disk)
+      deflection_profile      — spanwise vertical deflection (aerostruct only)
+      weight_breakdown        — structural mass components bar chart (aerostruct only)
+      failure_heatmap         — failure index colour map over planform (aerostruct only)
+      twist_chord_overlay     — twist and chord profiles vs span
+      mesh_3d                 — 3D wireframe mesh with optional deflection overlay
+      multipoint_comparison   — side-by-side cruise vs maneuver results
 
     Output modes (set per-call via 'output' param, or per-session via configure_session):
       inline  — returns [metadata, ImageContent] (default, best for claude.ai)
@@ -297,13 +305,26 @@ async def visualize(
     # For planform, prefer session-stored mesh snapshot (faster), fall back to artifact
     mesh_snap = session.get_mesh_snapshot(run_id) or standard.get("mesh_snapshot", {})
     mesh_data = {"mesh_snapshot": mesh_snap} if mesh_snap else {}
-    # Provide a mesh array for the planform plot from the first surface snapshot
+    # Provide a mesh array from the first surface snapshot.
+    # Prefer the full mesh (for mesh_3d); fall back to LE/TE (for planform).
     for surf_name, surf_mesh in mesh_snap.items():
-        le = surf_mesh.get("leading_edge")
-        te = surf_mesh.get("trailing_edge")
-        if le and te:
-            # Build a minimal [nx=2, ny, 3] mesh from LE and TE rows
-            mesh_data["mesh"] = np.array([le, te]).tolist()
+        full_mesh = surf_mesh.get("mesh")
+        if full_mesh is not None:
+            mesh_data["mesh"] = full_mesh
+        else:
+            le = surf_mesh.get("leading_edge")
+            te = surf_mesh.get("trailing_edge")
+            if le and te:
+                mesh_data["mesh"] = np.array([le, te]).tolist()
+        # Also pass def_mesh if available in mesh_snapshot
+        def_mesh = surf_mesh.get("def_mesh")
+        if def_mesh is not None:
+            mesh_data["def_mesh"] = def_mesh
+        # Pass structural FEM data for mesh_3d tube/wingbox rendering
+        for struct_key in ("radius", "thickness", "fem_origin", "fem_model_type",
+                           "spar_thickness", "skin_thickness"):
+            if struct_key in surf_mesh:
+                mesh_data[struct_key] = surf_mesh[struct_key]
         break
 
     conv_data = session.get_convergence(run_id)

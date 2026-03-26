@@ -21,6 +21,12 @@ from oas_mcp.core.plotting import (
     plot_planform,
     plot_opt_dv_evolution,
     plot_opt_comparison,
+    plot_deflection_profile,
+    plot_weight_breakdown,
+    plot_failure_heatmap,
+    plot_twist_chord_overlay,
+    plot_mesh_3d,
+    plot_multipoint_comparison,
 )
 
 
@@ -480,3 +486,305 @@ class TestN2DiagramE2E:
         assert "file_path" in metadata
         assert Path(metadata["file_path"]).exists(), \
             f"N2 file not found at {metadata['file_path']}"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: deflection_profile
+# ---------------------------------------------------------------------------
+
+
+class TestDeflectionProfile:
+    """Tests for the spanwise deflection profile plot."""
+
+    def test_nodal_deflection(self):
+        """Full deflection_m array renders a line plot."""
+        n = 7
+        results = {
+            "surfaces": {
+                "wing": {
+                    "sectional_data": {
+                        "y_span_norm": [i / (n - 1) for i in range(n)],
+                        "deflection_m": [0.0, 0.01, 0.03, 0.06, 0.10, 0.15, 0.20],
+                    },
+                },
+            },
+        }
+        res = plot_deflection_profile(_RUN_ID, results)
+        assert _is_valid_plot(res)
+        assert res.metadata["plot_type"] == "deflection_profile"
+
+    def test_scalar_fallback(self):
+        """Only tip_deflection_m available → single annotated point."""
+        results = {
+            "surfaces": {
+                "wing": {
+                    "tip_deflection_m": 0.25,
+                    "sectional_data": {},
+                },
+            },
+        }
+        res = plot_deflection_profile(_RUN_ID, results)
+        assert _is_valid_plot(res)
+
+    def test_no_data(self):
+        """Empty results → placeholder renders."""
+        results = {"surfaces": {}}
+        res = plot_deflection_profile(_RUN_ID, results)
+        assert _is_valid_plot(res)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: weight_breakdown
+# ---------------------------------------------------------------------------
+
+
+class TestWeightBreakdown:
+    """Tests for the structural mass bar chart."""
+
+    def test_single_surface(self):
+        results = {
+            "surfaces": {
+                "wing": {"structural_mass_kg": 1234.5},
+            },
+        }
+        res = plot_weight_breakdown(_RUN_ID, results)
+        assert _is_valid_plot(res)
+
+    def test_multi_surface(self):
+        results = {
+            "surfaces": {
+                "wing": {"structural_mass_kg": 1000.0},
+                "tail": {"structural_mass_kg": 200.0},
+            },
+        }
+        res = plot_weight_breakdown(_RUN_ID, results)
+        assert _is_valid_plot(res)
+
+    def test_no_data(self):
+        results = {"surfaces": {}}
+        res = plot_weight_breakdown(_RUN_ID, results)
+        assert _is_valid_plot(res)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: failure_heatmap
+# ---------------------------------------------------------------------------
+
+
+class TestFailureHeatmap:
+    """Tests for the failure index planform heatmap."""
+
+    def test_basic_render(self):
+        """Mesh + failure_index → colour-mapped planform."""
+        ny = 7
+        nx = 2
+        mesh = np.zeros((nx, ny, 3))
+        for j in range(ny):
+            mesh[0, j, :] = [0.0, -j, 0.0]   # LE
+            mesh[1, j, :] = [1.0, -j, 0.0]    # TE
+        failure = [0.3, 0.5, 0.8, 1.2, 0.6, 0.4]  # ny-1 elements
+
+        results = {
+            "surfaces": {
+                "wing": {
+                    "sectional_data": {
+                        "failure_index": failure,
+                    },
+                },
+            },
+        }
+        mesh_data = {"mesh": mesh.tolist()}
+        res = plot_failure_heatmap(_RUN_ID, results, mesh_data)
+        assert _is_valid_plot(res)
+
+    def test_no_failure_data(self):
+        results = {"surfaces": {}}
+        res = plot_failure_heatmap(_RUN_ID, results, None)
+        assert _is_valid_plot(res)
+
+    def test_no_mesh_data(self):
+        results = {
+            "surfaces": {
+                "wing": {
+                    "sectional_data": {
+                        "failure_index": [0.5, 0.8],
+                    },
+                },
+            },
+        }
+        res = plot_failure_heatmap(_RUN_ID, results, None)
+        assert _is_valid_plot(res)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: twist_chord_overlay
+# ---------------------------------------------------------------------------
+
+
+class TestTwistChordOverlay:
+    """Tests for the twist/chord dual-axis plot."""
+
+    def test_from_sectional_data(self):
+        n = 7
+        results = {
+            "sectional_data": {
+                "y_span_norm": [i / (n - 1) for i in range(n)],
+                "twist_deg": [-3.0, -2.5, -2.0, -1.5, -1.0, -0.5, 0.0],
+                "chord_m": [5.0, 4.5, 4.0, 3.5, 3.0, 2.5, 2.0],
+            },
+            "surfaces": {},
+        }
+        res = plot_twist_chord_overlay(_RUN_ID, results)
+        assert _is_valid_plot(res)
+
+    def test_from_mesh_fallback(self):
+        """No sectional twist/chord → compute from mesh."""
+        ny = 5
+        nx = 2
+        mesh = np.zeros((nx, ny, 3))
+        for j in range(ny):
+            mesh[0, j, :] = [0.0, -(4 - j) * 3.0, j * 0.05]     # LE with twist
+            mesh[1, j, :] = [4.0 - j * 0.3, -(4 - j) * 3.0, 0.0]  # TE tapering
+        results = {"surfaces": {}}
+        mesh_data = {"mesh": mesh.tolist()}
+        res = plot_twist_chord_overlay(_RUN_ID, results, mesh_data)
+        assert _is_valid_plot(res)
+
+    def test_no_data(self):
+        results = {"surfaces": {}}
+        res = plot_twist_chord_overlay(_RUN_ID, results, None)
+        assert _is_valid_plot(res)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: mesh_3d
+# ---------------------------------------------------------------------------
+
+
+class TestMesh3D:
+    """Tests for the 3D wireframe mesh plot."""
+
+    def test_basic_wireframe(self):
+        """Simple [3, 7, 3] mesh renders as wireframe."""
+        nx, ny = 3, 7
+        mesh = np.zeros((nx, ny, 3))
+        for i in range(nx):
+            for j in range(ny):
+                mesh[i, j, :] = [i * 2.0, -j * 3.0, 0.0]
+        mesh_data = {"mesh": mesh.tolist()}
+        res = plot_mesh_3d(_RUN_ID, mesh_data)
+        assert _is_valid_plot(res)
+        assert res.metadata["plot_type"] == "mesh_3d"
+        # Verify wider figure
+        assert res.metadata["width_px"] >= 1000
+
+    def test_with_deflection(self):
+        """Mesh + def_mesh renders deformed overlay."""
+        nx, ny = 2, 7
+        mesh = np.zeros((nx, ny, 3))
+        def_mesh = np.zeros((nx, ny, 3))
+        for i in range(nx):
+            for j in range(ny):
+                mesh[i, j, :] = [i * 5.0, -j * 4.0, 0.0]
+                def_mesh[i, j, :] = [i * 5.0, -j * 4.0, j * 0.05]
+        mesh_data = {"mesh": mesh.tolist(), "def_mesh": def_mesh.tolist()}
+        res = plot_mesh_3d(_RUN_ID, mesh_data)
+        assert _is_valid_plot(res)
+
+    def test_no_mesh_fallback(self):
+        """Empty mesh_data → placeholder renders."""
+        res = plot_mesh_3d(_RUN_ID, {})
+        assert _is_valid_plot(res)
+
+    def test_with_tube_structure(self):
+        """Mesh + radius/thickness/fem_origin renders tube cylinders."""
+        nx, ny = 2, 7
+        n_elem = ny - 1
+        mesh = np.zeros((nx, ny, 3))
+        for i in range(nx):
+            for j in range(ny):
+                mesh[i, j, :] = [i * 5.0, -j * 4.0, 0.0]
+        mesh_data = {
+            "mesh": mesh.tolist(),
+            "fem_model_type": "tube",
+            "radius": [0.1 + 0.02 * k for k in range(n_elem)],
+            "thickness": [0.005 + 0.001 * k for k in range(n_elem)],
+            "fem_origin": 0.35,
+        }
+        res = plot_mesh_3d(_RUN_ID, mesh_data)
+        assert _is_valid_plot(res)
+
+    def test_with_wingbox_structure(self):
+        """Mesh + spar/skin thickness renders wingbox panels."""
+        nx, ny = 2, 7
+        n_elem = ny - 1
+        mesh = np.zeros((nx, ny, 3))
+        for i in range(nx):
+            for j in range(ny):
+                mesh[i, j, :] = [i * 5.0, -j * 4.0, 0.0]
+        mesh_data = {
+            "mesh": mesh.tolist(),
+            "fem_model_type": "wingbox",
+            "spar_thickness": [0.01 + 0.002 * k for k in range(n_elem)],
+            "skin_thickness": [0.005 + 0.001 * k for k in range(n_elem)],
+            "fem_origin": 0.35,
+        }
+        res = plot_mesh_3d(_RUN_ID, mesh_data)
+        assert _is_valid_plot(res)
+
+    def test_tube_no_radius_fallback(self):
+        """fem_model_type=tube but no radius data → renders wireframe only (no crash)."""
+        nx, ny = 2, 5
+        mesh = np.zeros((nx, ny, 3))
+        for i in range(nx):
+            for j in range(ny):
+                mesh[i, j, :] = [i * 5.0, -j * 4.0, 0.0]
+        mesh_data = {"mesh": mesh.tolist(), "fem_model_type": "tube"}
+        res = plot_mesh_3d(_RUN_ID, mesh_data)
+        assert _is_valid_plot(res)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: multipoint_comparison
+# ---------------------------------------------------------------------------
+
+
+class TestMultipointComparison:
+    """Tests for the cruise vs maneuver comparison plot."""
+
+    def test_two_points(self):
+        results = {
+            "final_results": {
+                "cruise": {
+                    "CL": 0.5, "CD": 0.02,
+                    "surfaces": {
+                        "wing": {
+                            "sectional_data": {
+                                "y_span_norm": [0.0, 0.33, 0.67, 1.0],
+                                "failure_index": [0.3, 0.5, 0.4],
+                                "deflection_m": [0.0, 0.05, 0.1, 0.15],
+                            },
+                        },
+                    },
+                },
+                "maneuver": {
+                    "CL": 0.8, "CD": 0.04,
+                    "surfaces": {
+                        "wing": {
+                            "sectional_data": {
+                                "y_span_norm": [0.0, 0.33, 0.67, 1.0],
+                                "failure_index": [0.6, 0.9, 0.7],
+                                "deflection_m": [0.0, 0.10, 0.20, 0.30],
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        res = plot_multipoint_comparison(_RUN_ID, results)
+        assert _is_valid_plot(res)
+
+    def test_single_point_fallback(self):
+        results = {"final_results": {"cruise": {"CL": 0.5}}}
+        res = plot_multipoint_comparison(_RUN_ID, results)
+        assert _is_valid_plot(res)

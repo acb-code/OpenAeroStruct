@@ -225,6 +225,33 @@ def extract_standard_detail(
                 "ny": ny,
             }
 
+            # Twist and chord distributions from mesh geometry
+            le_x = np.asarray(mesh[0, :, 0])
+            te_x = np.asarray(mesh[-1, :, 0])
+            le_z = np.asarray(mesh[0, :, 2])
+            te_z = np.asarray(mesh[-1, :, 2])
+            chord_arr = te_x - le_x
+            twist_arr = np.degrees(np.arctan2(te_z - le_z, chord_arr))
+            sect["chord_m"] = chord_arr[::-1].tolist()   # root-to-tip
+            sect["twist_deg"] = twist_arr[::-1].tolist()  # root-to-tip
+
+            # Structural FEM data for 3D visualisation
+            snap = standard["mesh_snapshot"][name]
+            snap["fem_origin"] = surface.get("fem_origin", 0.35)
+            snap["fem_model_type"] = surface.get("fem_model_type")
+            # Tube model: radius and thickness per element (ny-1)
+            radius_val = _try_get(prob, f"{name}.radius")
+            if radius_val is not None:
+                snap["radius"] = np.squeeze(np.asarray(radius_val)).tolist()
+            thickness_val = _try_get(prob, f"{name}.thickness")
+            if thickness_val is not None:
+                snap["thickness"] = np.asarray(thickness_val).ravel().tolist()
+            # Wingbox model: spar and skin thickness per element
+            for wb_key in ("spar_thickness", "skin_thickness"):
+                wb_val = _try_get(prob, f"{name}.{wb_key}")
+                if wb_val is not None:
+                    snap[wb_key] = np.asarray(wb_val).ravel().tolist()
+
         # Sectional CL (panel-level) — path varies by OAS version
         for cl_path in [
             f"{point_name}.{name}_perf.Cl",

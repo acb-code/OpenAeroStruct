@@ -8,14 +8,20 @@ the rendered PNG.
 
 Supported plot types (strict enum)
 -----------------------------------
-  "lift_distribution"   — spanwise sectional Cl distribution
-  "drag_polar"          — CL vs CD and L/D vs alpha
-  "stress_distribution" — spanwise von Mises stress
-  "convergence"         — solver residual vs iteration (if trace available)
-  "planform"            — wing planform + deflection overlay
-  "opt_history"         — optimizer objective convergence history
-  "opt_dv_evolution"    — design variable evolution over optimizer iterations
-  "opt_comparison"      — before/after DV comparison (initial vs optimized)
+  "lift_distribution"       — spanwise sectional Cl distribution
+  "drag_polar"              — CL vs CD and L/D vs alpha
+  "stress_distribution"     — spanwise von Mises stress
+  "convergence"             — solver residual vs iteration (if trace available)
+  "planform"                — wing planform + deflection overlay
+  "opt_history"             — optimizer objective convergence history
+  "opt_dv_evolution"        — design variable evolution over optimizer iterations
+  "opt_comparison"          — before/after DV comparison (initial vs optimized)
+  "deflection_profile"      — spanwise vertical deflection
+  "weight_breakdown"        — structural mass components bar chart
+  "failure_heatmap"         — failure index color map over planform
+  "twist_chord_overlay"     — twist and chord profiles vs span
+  "mesh_3d"                 — 3D wireframe mesh with optional deflection
+  "multipoint_comparison"   — side-by-side cruise vs maneuver results
 
 All plots include:
   - Axes labels with units
@@ -104,11 +110,20 @@ PLOT_TYPES = frozenset({
     "opt_dv_evolution",
     "opt_comparison",
     "n2",
+    "deflection_profile",
+    "weight_breakdown",
+    "failure_heatmap",
+    "twist_chord_overlay",
+    "mesh_3d",
+    "multipoint_comparison",
 })
 
 _FIG_WIDTH_IN = 6.0   # inches
 _FIG_HEIGHT_IN = 3.6  # inches
 _DPI = 150            # → 900 × 540 px
+
+_FIG_3D_WIDTH_IN = 8.0    # inches → 1200 px at 150 DPI
+_FIG_3D_HEIGHT_IN = 5.33  # inches → ~800 px at 150 DPI
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +185,32 @@ def _make_fig(run_id: str, title: str) -> tuple:
     fig, ax = plt.subplots(figsize=(_FIG_WIDTH_IN, _FIG_HEIGHT_IN))
     fig.suptitle(f"{title}\n(run_id: {run_id})", fontsize=9, y=0.98)
     return fig, ax
+
+
+def _make_fig_3d(run_id: str, title: str) -> tuple:
+    """Create a wider figure with a 3D Axes3D subplot."""
+    _, plt = _require_mpl()
+    fig = plt.figure(figsize=(_FIG_3D_WIDTH_IN, _FIG_3D_HEIGHT_IN))
+    ax = fig.add_subplot(111, projection="3d")
+    fig.suptitle(f"{title}\n(run_id: {run_id})", fontsize=9, y=0.98)
+    return fig, ax
+
+
+def _find_sectional(results: dict) -> dict | None:
+    """Find sectional data dict from results, handling nested and flat layouts."""
+    sectional = results.get("sectional_data", {})
+    if sectional:
+        if "y_span_norm" in sectional:
+            return sectional
+        for sd in sectional.values():
+            if isinstance(sd, dict) and "y_span_norm" in sd:
+                return sd
+    # Try per-surface sectional data
+    for surf_res in results.get("surfaces", {}).values():
+        sect = surf_res.get("sectional_data", {})
+        if sect and "y_span_norm" in sect:
+            return sect
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +849,616 @@ def plot_opt_comparison(run_id: str, optimization_history: dict, case_name: str 
 
 
 # ---------------------------------------------------------------------------
+# Plot: deflection_profile
+# ---------------------------------------------------------------------------
+
+
+def plot_deflection_profile(run_id: str, results: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
+    """Plot spanwise vertical deflection profile.
+
+    Primary data: ``sectional_data.deflection_m`` (per-node z-displacement).
+    Falls back to scalar ``tip_deflection_m`` if spanwise data is unavailable.
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    title = f"Deflection Profile — {case_name}" if case_name else "Deflection Profile"
+    fig, ax = _make_fig(run_id, title)
+
+    plotted = False
+    for surf_name, surf_res in results.get("surfaces", {}).items():
+        sectional = surf_res.get("sectional_data", {})
+        y = sectional.get("y_span_norm")
+        defl = sectional.get("deflection_m")
+
+        if y and defl:
+            # deflection_m may have ny or ny-1 entries
+            if len(defl) == len(y):
+                y_plot = y
+            elif len(defl) == len(y) - 1:
+                y_plot = [(y[i] + y[i + 1]) / 2.0 for i in range(len(defl))]
+            else:
+                continue
+            ax.plot(y_plot, defl, "-o", markersize=3, linewidth=1.5, label=surf_name)
+            plotted = True
+        elif surf_res.get("tip_deflection_m") is not None:
+            tip_d = surf_res["tip_deflection_m"]
+            ax.plot([1.0], [tip_d], "ro", markersize=8, label=f"{surf_name} tip")
+            ax.annotate(f"{tip_d:.4f} m", (1.0, tip_d), textcoords="offset points",
+                        xytext=(-40, 10), fontsize=8)
+            plotted = True
+
+    ax.axhline(0, color="gray", linewidth=0.8, linestyle="--", alpha=0.5)
+    ax.set_xlabel("Normalised spanwise station η  [—]   (0 = root, 1 = tip)")
+    ax.set_ylabel("Vertical deflection  [m]")
+    if plotted:
+        ax.legend(fontsize=7)
+    else:
+        ax.text(0.5, 0.5, "No deflection data available", transform=ax.transAxes,
+                ha="center", va="center", fontsize=10, color="gray")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    return _fig_to_response(fig, run_id, "deflection_profile", save_dir=save_dir)
+
+
+# ---------------------------------------------------------------------------
+# Plot: weight_breakdown
+# ---------------------------------------------------------------------------
+
+
+def plot_weight_breakdown(run_id: str, results: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
+    """Plot structural mass breakdown as a horizontal bar chart.
+
+    Shows per-surface structural mass.  If ``element_mass_kg`` is available
+    in sectional data, it is shown as a stacked detail alongside the total.
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    title = f"Weight Breakdown — {case_name}" if case_name else "Weight Breakdown"
+    fig, ax = _make_fig(run_id, title)
+
+    names = []
+    masses = []
+    for surf_name, surf_res in results.get("surfaces", {}).items():
+        sm = surf_res.get("structural_mass_kg")
+        if sm is not None:
+            names.append(surf_name)
+            masses.append(float(sm))
+
+    # Also check top-level structural_mass
+    total_sm = results.get("structural_mass")
+    if total_sm is not None and not names:
+        names.append("total")
+        masses.append(float(total_sm))
+
+    if names:
+        y_pos = np.arange(len(names))
+        bars = ax.barh(y_pos, masses, color="steelblue", edgecolor="navy", linewidth=0.8)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(names, fontsize=8)
+        ax.set_xlabel("Structural mass  [kg]")
+        # Annotate bar values
+        for bar, m in zip(bars, masses):
+            ax.text(bar.get_width() + max(masses) * 0.01, bar.get_y() + bar.get_height() / 2,
+                    f"{m:.2f}", va="center", fontsize=8)
+        total = sum(masses)
+        ax.set_title(f"Total structural mass: {total:.2f} kg", fontsize=8)
+    else:
+        ax.text(0.5, 0.5, "No structural mass data available", transform=ax.transAxes,
+                ha="center", va="center", fontsize=10, color="gray")
+        ax.axis("off")
+
+    ax.grid(True, alpha=0.3, axis="x")
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    return _fig_to_response(fig, run_id, "weight_breakdown", save_dir=save_dir)
+
+
+# ---------------------------------------------------------------------------
+# Plot: failure_heatmap
+# ---------------------------------------------------------------------------
+
+
+def plot_failure_heatmap(
+    run_id: str, results: dict, mesh_data: dict | None = None,
+    case_name: str = "", *, save_dir: str | Path | None = None,
+) -> PlotResult:
+    """Plot failure index as a colour map over the wing planform.
+
+    Each panel quad is coloured by its failure index value.  Uses
+    ``matplotlib.collections.PolyCollection`` for efficient rendering.
+    Green = safe (failure < 1), red = structural failure (failure >= 1).
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PolyCollection
+    from matplotlib.colors import Normalize
+
+    title = f"Failure Heatmap — {case_name}" if case_name else "Failure Heatmap"
+    fig, ax = _make_fig(run_id, title)
+
+    mesh_data = mesh_data or {}
+    mesh_list = mesh_data.get("mesh")
+
+    # Find failure_index from surfaces
+    failure = None
+    for surf_res in results.get("surfaces", {}).values():
+        sect = surf_res.get("sectional_data", {})
+        fi = sect.get("failure_index")
+        if fi:
+            failure = fi
+            break
+
+    if mesh_list is None or failure is None:
+        missing = []
+        if mesh_list is None:
+            missing.append("mesh")
+        if failure is None:
+            missing.append("failure_index")
+        ax.text(0.5, 0.5, f"Data not available: {', '.join(missing)}",
+                transform=ax.transAxes, ha="center", va="center",
+                fontsize=10, color="gray")
+        ax.axis("off")
+        fig.tight_layout(rect=[0, 0, 1, 0.93])
+        return _fig_to_response(fig, run_id, "failure_heatmap", save_dir=save_dir)
+
+    mesh = np.array(mesh_list)
+    nx, ny, _ = mesh.shape
+    n_panels = ny - 1
+
+    # Build quads: each panel is a polygon with 4 corners (LE_j, TE_j, TE_j+1, LE_j+1)
+    # Plot in y (spanwise) vs x (chordwise) plane
+    quads = []
+    for j in range(n_panels):
+        quad = [
+            [mesh[0, j, 1], mesh[0, j, 0]],       # LE, station j
+            [mesh[-1, j, 1], mesh[-1, j, 0]],      # TE, station j
+            [mesh[-1, j + 1, 1], mesh[-1, j + 1, 0]],  # TE, station j+1
+            [mesh[0, j + 1, 1], mesh[0, j + 1, 0]],    # LE, station j+1
+        ]
+        quads.append(quad)
+
+    # Truncate/extend failure to match panels
+    fi_arr = np.array(failure[:n_panels]) if len(failure) >= n_panels else np.array(failure)
+    if len(fi_arr) < n_panels:
+        fi_arr = np.pad(fi_arr, (0, n_panels - len(fi_arr)), constant_values=0.0)
+
+    cmap = plt.get_cmap("RdYlGn_r")
+    # Normalise: 0 to max(failure, 1.5) so the colour scale is meaningful
+    vmax = max(float(fi_arr.max()), 1.5)
+    norm = Normalize(vmin=0, vmax=vmax)
+
+    pc = PolyCollection(quads, array=fi_arr, cmap=cmap, norm=norm,
+                        edgecolors="k", linewidths=0.5)
+    ax.add_collection(pc)
+    ax.autoscale()
+
+    cbar = fig.colorbar(pc, ax=ax, shrink=0.8, pad=0.02)
+    cbar.set_label("Failure index  [—]  (>1.0 = failed)", fontsize=8)
+
+    # Mark failure threshold
+    if float(fi_arr.max()) > 1.0:
+        ax.set_title(f"max failure = {float(fi_arr.max()):.3f} (FAILED)", fontsize=8, color="red")
+    else:
+        ax.set_title(f"max failure = {float(fi_arr.max()):.3f} (OK)", fontsize=8)
+
+    ax.set_xlabel("Spanwise y  [m]")
+    ax.set_ylabel("Chordwise x  [m]")
+    ax.grid(True, alpha=0.2)
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    return _fig_to_response(fig, run_id, "failure_heatmap", save_dir=save_dir)
+
+
+# ---------------------------------------------------------------------------
+# Plot: twist_chord_overlay
+# ---------------------------------------------------------------------------
+
+
+def plot_twist_chord_overlay(
+    run_id: str, results: dict, mesh_data: dict | None = None,
+    case_name: str = "", *, save_dir: str | Path | None = None,
+) -> PlotResult:
+    """Plot twist and chord distributions vs spanwise station on dual y-axes.
+
+    Twist (degrees) on the left axis, chord (metres) on the right axis.
+    Extracts from ``sectional_data.twist_deg`` and ``chord_m``, or computes
+    from the mesh leading/trailing edge coordinates as a fallback.
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    title = f"Twist & Chord — {case_name}" if case_name else "Twist & Chord Distribution"
+    fig, ax1 = plt.subplots(figsize=(_FIG_WIDTH_IN, _FIG_HEIGHT_IN))
+    fig.suptitle(f"{title}\n(run_id: {run_id})", fontsize=9, y=0.98)
+
+    twist = None
+    chord = None
+    y_span = None
+
+    # Try sectional data first
+    sect = _find_sectional(results)
+    if sect:
+        y_span = sect.get("y_span_norm")
+        twist = sect.get("twist_deg")
+        chord = sect.get("chord_m")
+
+    # Fallback: compute from mesh
+    mesh_data = mesh_data or {}
+    mesh_list = mesh_data.get("mesh")
+    if (twist is None or chord is None) and mesh_list is not None:
+        mesh = np.array(mesh_list)
+        le_x = mesh[0, :, 0]
+        te_x = mesh[-1, :, 0]
+        le_z = mesh[0, :, 2]
+        te_z = mesh[-1, :, 2]
+        chord_arr = te_x - le_x
+        twist_arr = np.degrees(np.arctan2(te_z - le_z, chord_arr))
+        # Reverse to root-to-tip
+        if chord is None:
+            chord = chord_arr[::-1].tolist()
+        if twist is None:
+            twist = twist_arr[::-1].tolist()
+        if y_span is None:
+            y_abs = np.abs(mesh[0, :, 1])
+            y_max = y_abs.max() if y_abs.max() > 0 else 1.0
+            y_span = (y_abs[::-1] / y_max).tolist()
+
+    if twist is None and chord is None:
+        ax1.text(0.5, 0.5, "No twist/chord data available", transform=ax1.transAxes,
+                 ha="center", va="center", fontsize=10, color="gray")
+        ax1.axis("off")
+        fig.tight_layout(rect=[0, 0, 1, 0.93])
+        return _fig_to_response(fig, run_id, "twist_chord_overlay", save_dir=save_dir)
+
+    x_axis = y_span if y_span else list(range(max(len(twist or []), len(chord or []))))
+
+    # Twist on left axis (blue)
+    color_tw = "tab:blue"
+    ax1.set_xlabel("Normalised spanwise station η  [—]   (0 = root, 1 = tip)")
+    if twist and len(twist) == len(x_axis):
+        ax1.plot(x_axis, twist, color=color_tw, linewidth=1.5, marker="o", markersize=3, label="Twist")
+        ax1.set_ylabel("Twist  [deg]", color=color_tw)
+        ax1.tick_params(axis="y", labelcolor=color_tw)
+
+    # Chord on right axis (red)
+    ax2 = ax1.twinx()
+    color_ch = "tab:red"
+    if chord and len(chord) == len(x_axis):
+        ax2.plot(x_axis, chord, color=color_ch, linewidth=1.5, marker="s", markersize=3, label="Chord")
+        ax2.set_ylabel("Chord  [m]", color=color_ch)
+        ax2.tick_params(axis="y", labelcolor=color_ch)
+
+    ax1.grid(True, alpha=0.3)
+    # Combined legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    if lines1 or lines2:
+        ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=7, loc="best")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    return _fig_to_response(fig, run_id, "twist_chord_overlay", save_dir=save_dir)
+
+
+# ---------------------------------------------------------------------------
+# Helpers: structural FEM rendering (from plot_wing.py lines 508-560)
+# ---------------------------------------------------------------------------
+
+
+def _draw_tube_structure(ax, mesh, radius, thickness, fem_origin):
+    """Draw coloured cylindrical FEM tube elements along the spar.
+
+    Adapted from ``openaerostruct/utils/plot_wing.py`` lines 508-560.
+    Each element is a short cylinder segment coloured by normalised thickness.
+    """
+    matplotlib, _ = _require_mpl()
+    cm = matplotlib.cm
+
+    radius = np.asarray(radius)
+    thickness = np.asarray(thickness)
+    t_max = float(thickness.max()) if thickness.max() > 0 else 1.0
+    colors = thickness / t_max  # normalise for colormap
+
+    num_circ = 12
+    p = np.linspace(0, 2 * np.pi, num_circ)
+
+    chords = mesh[-1, :, 0] - mesh[0, :, 0]
+    comp = fem_origin * chords + mesh[0, :, 0]
+
+    for i in range(len(thickness)):
+        r = np.array((radius[i], radius[i]))
+        R, P = np.meshgrid(r, p)
+        X, Z = R * np.cos(P), R * np.sin(P)
+
+        X[:, 0] += comp[i]
+        X[:, 1] += comp[i + 1]
+        Z[:, 0] += fem_origin * (mesh[-1, i, 2] - mesh[0, i, 2]) + mesh[0, i, 2]
+        Z[:, 1] += fem_origin * (mesh[-1, i + 1, 2] - mesh[0, i + 1, 2]) + mesh[0, i + 1, 2]
+
+        Y = np.empty(X.shape)
+        Y[:] = np.linspace(mesh[0, i, 1], mesh[0, i + 1, 1], 2)
+
+        col = np.full(X.shape, colors[i])
+        ax.plot_surface(X, Y, Z, rstride=1, cstride=1,
+                        facecolors=cm.viridis(col), linewidth=0)
+
+
+def _draw_wingbox_structure(ax, mesh, spar_thickness, skin_thickness, fem_origin):
+    """Draw coloured rectangular spar panels for wingbox FEM model.
+
+    Draws flat rectangular panels along the spar location, coloured by
+    spar thickness. Simpler than the tube representation but clearly shows
+    the structural element locations.
+    """
+    matplotlib, _ = _require_mpl()
+    cm = matplotlib.cm
+
+    spar_t = np.asarray(spar_thickness)
+    t_max = float(spar_t.max()) if spar_t.max() > 0 else 1.0
+    colors = spar_t / t_max
+
+    chords = mesh[-1, :, 0] - mesh[0, :, 0]
+    comp = fem_origin * chords + mesh[0, :, 0]
+
+    for i in range(len(spar_t)):
+        # Rectangular panel along spar between nodes i and i+1
+        # Width = fraction of local chord for visibility
+        half_h = max(chords[i], chords[i + 1]) * 0.02  # half-height of panel
+        x_c0, x_c1 = comp[i], comp[i + 1]
+        z0 = fem_origin * (mesh[-1, i, 2] - mesh[0, i, 2]) + mesh[0, i, 2]
+        z1 = fem_origin * (mesh[-1, i + 1, 2] - mesh[0, i + 1, 2]) + mesh[0, i + 1, 2]
+        y0, y1 = mesh[0, i, 1], mesh[0, i + 1, 1]
+
+        # Four corners of the rectangular panel
+        xs = np.array([[x_c0, x_c1], [x_c0, x_c1]])
+        ys = np.array([[y0, y1], [y0, y1]])
+        zs = np.array([[z0 - half_h, z1 - half_h], [z0 + half_h, z1 + half_h]])
+
+        col = np.full(xs.shape, colors[i])
+        ax.plot_surface(xs, ys, zs, rstride=1, cstride=1,
+                        facecolors=cm.viridis(col), linewidth=0)
+
+
+# ---------------------------------------------------------------------------
+# Plot: mesh_3d  (adapted from openaerostruct/utils/plot_wing.py lines 462-578)
+# ---------------------------------------------------------------------------
+
+
+def plot_mesh_3d(
+    run_id: str, mesh_data: dict, case_name: str = "", *,
+    save_dir: str | Path | None = None,
+    show_deflection: bool = True,
+    deflection_scale: float = 2.0,
+) -> PlotResult:
+    """Plot 3D wireframe mesh with optional deflection overlay.
+
+    Rendering approach is directly adapted from the proven
+    ``openaerostruct/utils/plot_wing.py`` — using ``Axes3D.plot_wireframe``
+    with the matplotlib Agg backend for headless PNG generation.
+
+    Parameters
+    ----------
+    mesh_data:
+        Dict with ``mesh`` (list of shape [nx, ny, 3]) and optionally
+        ``def_mesh`` (deformed mesh, same shape) for deflection overlay.
+    show_deflection:
+        Whether to overlay the deformed mesh (when available).
+    deflection_scale:
+        Exaggeration factor for deflection visualisation (default 2.0).
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    title = f"3D Mesh — {case_name}" if case_name else "3D Wing Mesh"
+    fig, ax = _make_fig_3d(run_id, title)
+
+    mesh_list = mesh_data.get("mesh")
+    if mesh_list is None:
+        ax.text2D(0.5, 0.5, "Mesh data not available.\n"
+                  "Call get_detailed_results(run_id, 'standard') first.",
+                  transform=ax.transAxes, ha="center", va="center",
+                  fontsize=9, color="gray")
+        ax.set_axis_off()
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=0.90)
+        return _fig_to_response(fig, run_id, "mesh_3d", save_dir=save_dir)
+
+    mesh = np.array(mesh_list)
+    x = mesh[:, :, 0]
+    y = mesh[:, :, 1]
+    z = mesh[:, :, 2]
+
+    def_mesh_list = mesh_data.get("def_mesh")
+    has_def = show_deflection and def_mesh_list is not None
+
+    if has_def:
+        def_mesh = np.array(def_mesh_list)
+        # Exaggerate deflection (adapted from plot_wing.py line 490)
+        def_mesh_vis = (def_mesh - mesh) * deflection_scale + def_mesh
+        x_def = def_mesh_vis[:, :, 0]
+        y_def = def_mesh_vis[:, :, 1]
+        z_def = def_mesh_vis[:, :, 2]
+        # Deformed in black, undeformed in light gray
+        ax.plot_wireframe(x_def, y_def, z_def, rstride=1, cstride=1, color="k",
+                          linewidth=0.8)
+        ax.plot_wireframe(x, y, z, rstride=1, cstride=1, color="k", alpha=0.3,
+                          linewidth=0.5)
+    else:
+        ax.plot_wireframe(x, y, z, rstride=1, cstride=1, color="k", linewidth=0.8)
+
+    # Structural FEM rendering — use deformed mesh if available for spar position
+    struct_mesh = def_mesh_vis if has_def else mesh
+    fem_type = mesh_data.get("fem_model_type")
+    struct_label = None
+
+    if fem_type == "tube" and mesh_data.get("radius") is not None:
+        radius = mesh_data["radius"]
+        thickness = mesh_data.get("thickness", radius)
+        fem_origin = mesh_data.get("fem_origin", 0.35)
+        _draw_tube_structure(ax, struct_mesh, radius, thickness, fem_origin)
+        struct_label = "tube (colour = thickness)"
+    elif fem_type == "wingbox" and mesh_data.get("spar_thickness") is not None:
+        spar_t = mesh_data["spar_thickness"]
+        skin_t = mesh_data.get("skin_thickness", spar_t)
+        fem_origin = mesh_data.get("fem_origin", 0.35)
+        _draw_wingbox_structure(ax, struct_mesh, spar_t, skin_t, fem_origin)
+        struct_label = "wingbox (colour = spar thickness)"
+
+    # Per-axis scaling with equal aspect ratio so the wing fills the frame.
+    # Compute actual data range per axis, then pad to equal half-range.
+    all_pts = mesh
+    if has_def:
+        all_pts = np.concatenate([mesh, def_mesh_vis], axis=0)
+    x_min, x_max = float(all_pts[:, :, 0].min()), float(all_pts[:, :, 0].max())
+    y_min, y_max = float(all_pts[:, :, 1].min()), float(all_pts[:, :, 1].max())
+    z_min, z_max = float(all_pts[:, :, 2].min()), float(all_pts[:, :, 2].max())
+    # Equal half-range on each axis (preserves aspect ratio)
+    ranges = [x_max - x_min, y_max - y_min, max(z_max - z_min, 0.5)]
+    max_range = max(ranges) / 2.0
+    x_mid = (x_max + x_min) / 2.0
+    y_mid = (y_max + y_min) / 2.0
+    z_mid = (z_max + z_min) / 2.0
+    ax.auto_scale_xyz(
+        [x_mid - max_range, x_mid + max_range],
+        [y_mid - max_range, y_mid + max_range],
+        [z_mid - max_range, z_mid + max_range],
+    )
+    ax.set_axis_off()
+    ax.view_init(elev=25, azim=-135)
+
+    # Subtitle with mesh dimensions and structural model info
+    nx, ny, _ = mesh.shape
+    sub = f"Mesh: {nx}×{ny} nodes"
+    if struct_label:
+        sub += f"  |  {struct_label}"
+    if has_def:
+        max_defl = float(np.max(np.abs(def_mesh[:, :, 2] - mesh[:, :, 2])))
+        sub += f"  |  max z-deflection: {max_defl:.4f} m (x{deflection_scale} exaggerated)"
+    ax.set_title(sub, fontsize=8, y=-0.02)
+
+    fig.subplots_adjust(left=0, right=1, bottom=0.02, top=0.90)
+    return _fig_to_response(fig, run_id, "mesh_3d", save_dir=save_dir)
+
+
+# ---------------------------------------------------------------------------
+# Plot: multipoint_comparison
+# ---------------------------------------------------------------------------
+
+
+def plot_multipoint_comparison(run_id: str, results: dict, case_name: str = "", *, save_dir: str | Path | None = None) -> PlotResult:
+    """Plot side-by-side cruise vs maneuver comparison for multipoint results.
+
+    Expects ``results["final_results"]`` keyed by role (e.g. "cruise", "maneuver").
+    Shows 2x2 subplot grid: CL/CD bars, failure comparison, deflection, summary.
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    title = f"Multipoint Comparison — {case_name}" if case_name else "Multipoint Comparison"
+    fig, axes = plt.subplots(2, 2, figsize=(_FIG_WIDTH_IN * 1.3, _FIG_HEIGHT_IN * 1.3))
+    fig.suptitle(f"{title}\n(run_id: {run_id})", fontsize=9, y=0.99)
+
+    final = results.get("final_results", {})
+    if not final or len(final) < 2:
+        for ax in axes.flat:
+            ax.axis("off")
+        axes[0, 0].text(0.5, 0.5, "Multipoint results not available.\n"
+                        "Requires optimization with multiple flight points.",
+                        transform=axes[0, 0].transAxes, ha="center", va="center",
+                        fontsize=10, color="gray")
+        fig.tight_layout(rect=[0, 0, 1, 0.93])
+        return _fig_to_response(fig, run_id, "multipoint_comparison", save_dir=save_dir)
+
+    roles = list(final.keys())
+    colors = ["steelblue", "darkorange", "seagreen", "crimson"]
+
+    # Panel 1: CL/CD grouped bar
+    ax1 = axes[0, 0]
+    x = np.arange(2)  # CL, CD
+    width = 0.8 / len(roles)
+    for i, role in enumerate(roles):
+        pt = final[role]
+        cl = pt.get("CL", 0.0)
+        cd = pt.get("CD", 0.0)
+        offset = (i - len(roles) / 2 + 0.5) * width
+        ax1.bar(x + offset, [cl, cd], width, label=role, color=colors[i % len(colors)],
+                edgecolor="k", linewidth=0.5, alpha=0.85)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(["CL", "CD"], fontsize=9)
+    ax1.legend(fontsize=7)
+    ax1.set_title("Aero coefficients", fontsize=8)
+    ax1.grid(True, alpha=0.3, axis="y")
+
+    # Panel 2: Failure index per point
+    ax2 = axes[0, 1]
+    plotted_fail = False
+    for i, role in enumerate(roles):
+        pt = final[role]
+        for sname, sres in pt.get("surfaces", {}).items():
+            fi = sres.get("sectional_data", {}).get("failure_index")
+            y_s = sres.get("sectional_data", {}).get("y_span_norm")
+            if fi and y_s:
+                y_plot = y_s if len(fi) == len(y_s) else [(y_s[k] + y_s[k+1])/2 for k in range(len(fi))]
+                ax2.plot(y_plot, fi, color=colors[i % len(colors)], linewidth=1.5, label=role)
+                plotted_fail = True
+    if plotted_fail:
+        ax2.axhline(1.0, color="r", linewidth=1.5, linestyle="--", alpha=0.7)
+        ax2.legend(fontsize=7)
+    else:
+        ax2.text(0.5, 0.5, "No failure data", transform=ax2.transAxes,
+                 ha="center", va="center", fontsize=9, color="gray")
+    ax2.set_title("Failure index", fontsize=8)
+    ax2.set_xlabel("η", fontsize=8)
+    ax2.grid(True, alpha=0.3)
+
+    # Panel 3: Deflection per point
+    ax3 = axes[1, 0]
+    plotted_defl = False
+    for i, role in enumerate(roles):
+        pt = final[role]
+        for sname, sres in pt.get("surfaces", {}).items():
+            defl = sres.get("sectional_data", {}).get("deflection_m")
+            y_s = sres.get("sectional_data", {}).get("y_span_norm")
+            if defl and y_s and len(defl) == len(y_s):
+                ax3.plot(y_s, defl, color=colors[i % len(colors)], linewidth=1.5, label=role)
+                plotted_defl = True
+    if plotted_defl:
+        ax3.axhline(0, color="gray", linewidth=0.8, linestyle="--", alpha=0.5)
+        ax3.legend(fontsize=7)
+    else:
+        ax3.text(0.5, 0.5, "No deflection data", transform=ax3.transAxes,
+                 ha="center", va="center", fontsize=9, color="gray")
+    ax3.set_title("Deflection [m]", fontsize=8)
+    ax3.set_xlabel("η", fontsize=8)
+    ax3.grid(True, alpha=0.3)
+
+    # Panel 4: Summary table
+    ax4 = axes[1, 1]
+    ax4.axis("off")
+    rows = []
+    headers = ["Metric"] + roles
+    metrics = [("CL", ".4f"), ("CD", ".5f"), ("L/D", ".2f"), ("structural_mass_kg", ".1f")]
+    for metric, fmt in metrics:
+        row = [metric.replace("_", " ")]
+        for role in roles:
+            val = final[role].get(metric)
+            if val is None and metric == "L/D":
+                cl = final[role].get("CL", 0)
+                cd = final[role].get("CD")
+                val = cl / cd if cd and cd > 1e-12 else None
+            row.append(f"{val:{fmt}}" if val is not None else "—")
+        rows.append(row)
+
+    table = ax4.table(cellText=rows, colLabels=headers, loc="center",
+                      cellLoc="center", edges="horizontal")
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.4)
+    ax4.set_title("Summary", fontsize=8)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    return _fig_to_response(fig, run_id, "multipoint_comparison", save_dir=save_dir)
+
+
+# ---------------------------------------------------------------------------
 # N2 / DSM diagram (HTML saved to disk)
 # ---------------------------------------------------------------------------
 
@@ -971,5 +1622,17 @@ def generate_plot(
         return plot_opt_dv_evolution(run_id, optimization_history or {}, case_name, save_dir=save_dir)
     elif plot_type == "opt_comparison":
         return plot_opt_comparison(run_id, optimization_history or {}, case_name, save_dir=save_dir)
+    elif plot_type == "deflection_profile":
+        return plot_deflection_profile(run_id, results, case_name, save_dir=save_dir)
+    elif plot_type == "weight_breakdown":
+        return plot_weight_breakdown(run_id, results, case_name, save_dir=save_dir)
+    elif plot_type == "failure_heatmap":
+        return plot_failure_heatmap(run_id, results, mesh_data, case_name, save_dir=save_dir)
+    elif plot_type == "twist_chord_overlay":
+        return plot_twist_chord_overlay(run_id, results, mesh_data, case_name, save_dir=save_dir)
+    elif plot_type == "mesh_3d":
+        return plot_mesh_3d(run_id, mesh_data or {}, case_name, save_dir=save_dir)
+    elif plot_type == "multipoint_comparison":
+        return plot_multipoint_comparison(run_id, results, case_name, save_dir=save_dir)
     else:
         raise ValueError(f"Unhandled plot_type: {plot_type!r}")

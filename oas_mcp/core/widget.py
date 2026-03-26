@@ -33,6 +33,12 @@ _PNG_FALLBACK_TYPES = frozenset({
     "opt_history",
     "opt_dv_evolution",
     "opt_comparison",
+    "mesh_3d",
+    "failure_heatmap",
+    "multipoint_comparison",
+    "deflection_profile",
+    "weight_breakdown",
+    "twist_chord_overlay",
 })
 
 
