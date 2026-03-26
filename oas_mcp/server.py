@@ -150,6 +150,9 @@ PARAMETER TIPS:
     wing_type="rect" produces a flat untwisted planform — simpler but less realistic
   • failure > 1.0 means structural failure (utilisation ratio > 1); failure < 1.0 = OK
   • L_equals_W residual near 0 means the wing is sized to carry the aircraft weight
+  • mesh_3d plot: use run_aerostruct_analysis (not aero-only) with fem_model_type="tube"
+    or "wingbox" to see structural elements + deflection overlay. Aero-only runs show
+    wireframe only.
   • beta (sideslip angle, deg): set on run_aero_analysis / run_aerostruct_analysis /
     compute_drag_polar / compute_stability_derivatives. Default 0.0.
   • groundplane=True on create_surface enables ground effect; pair with height_agl

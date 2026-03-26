@@ -248,17 +248,38 @@ plot = visualize(run_id=run_id, plot_type="twist_chord_overlay")
 
 ### `mesh_3d`
 
-**What it shows:** 3D isometric wireframe of the wing mesh. For aerostruct runs, the deformed mesh is overlaid with exaggerated deflection.
+**What it shows:** 3D isometric wireframe of the wing mesh with optional structural FEM elements and deflection overlay.
 
-**Requires:** Any run with mesh data.
+**Requires:** Any run with mesh data. For full visualization:
+- **Wireframe only**: Any `run_aero_analysis` or `run_aerostruct_analysis` run.
+- **Structural tubes/wingbox**: Requires `create_surface` with `fem_model_type="tube"` (or `"wingbox"`) plus material properties (`E`, `G`, `yield_stress`, `mrho`), then `run_aerostruct_analysis`. The coloured elements along the spar show thickness variation (viridis colormap).
+- **Deflection overlay**: Requires `run_aerostruct_analysis` (not aero-only). Shows deformed mesh in black and undeformed in light gray, with 2x exaggeration.
 
 **Interpretation:**
 - Black wireframe shows the panel grid in 3D.
+- Coloured cylinders (tube) or panels (wingbox) show structural elements along the spar, coloured by thickness — yellow = thickest, green = thinnest.
 - For aerostruct: deformed mesh in black, undeformed in light gray.
 - Deflection is exaggerated (default 2x) for visibility.
 
+**Example — full structural 3D plot:**
 ```python
-plot = visualize(run_id=run_id, plot_type="mesh_3d")
+# 1. Create surface with structural properties
+create_surface(
+    name="wing", wing_type="CRM", num_x=3, num_y=7, symmetry=True,
+    fem_model_type="tube",
+    thickness_cp=[0.04, 0.06, 0.08, 0.06, 0.04],
+    E=70e9, G=30e9, yield_stress=500e6, mrho=3000.0,
+)
+
+# 2. Run aerostruct analysis (NOT aero-only — needed for deflection + structure)
+envelope = run_aerostruct_analysis(
+    surfaces=["wing"], alpha=5.0,
+    velocity=248.136, Mach_number=0.84, density=0.38, reynolds_number=1e6,
+    W0=120000, speed_of_sound=295.4, load_factor=1.0,
+)
+
+# 3. Visualize — will show wireframe + tube structure + deflection overlay
+plot = visualize(run_id=envelope["run_id"], plot_type="mesh_3d")
 ```
 
 ---
