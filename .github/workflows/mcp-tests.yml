@@ -39,7 +39,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[mcp]"
+          pip install -e ".[http]"
           pip install pytest pytest-asyncio anyio
 
       - name: Run MCP unit and integration tests
@@ -71,7 +71,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[mcp]"
+          pip install -e ".[http]"
           pip install pytest pytest-asyncio anyio
 
       - name: Run physics invariant golden tests
@@ -105,7 +105,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[mcp]"
+          pip install -e ".[http]"
           pip install pytest pytest-asyncio anyio
 
       - name: Run numeric baseline golden tests
