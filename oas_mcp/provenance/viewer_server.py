@@ -78,16 +78,30 @@ def generate_plot_png(run_id: str, plot_type: str) -> bytes | None:
                 plot_results["surfaces"][surf_name]["sectional_data"] = sect
         plot_results["sectional_data"] = standard.get("sectional_data", {})
 
-    # Build mesh_data for planform plot
+    # Build mesh_data for planform / mesh_3d plots
     mesh_data: dict = {}
     mesh_snap = standard.get("mesh_snapshot", {})
     if mesh_snap:
         mesh_data["mesh_snapshot"] = mesh_snap
         for _surf_name, surf_mesh in mesh_snap.items():
-            le = surf_mesh.get("leading_edge")
-            te = surf_mesh.get("trailing_edge")
-            if le and te:
-                mesh_data["mesh"] = np.array([le, te]).tolist()
+            # Prefer full mesh (for mesh_3d); fall back to LE/TE (for planform)
+            full_mesh = surf_mesh.get("mesh")
+            if full_mesh is not None:
+                mesh_data["mesh"] = full_mesh
+            else:
+                le = surf_mesh.get("leading_edge")
+                te = surf_mesh.get("trailing_edge")
+                if le and te:
+                    mesh_data["mesh"] = np.array([le, te]).tolist()
+            # Deformed mesh for deflection overlay
+            def_mesh = surf_mesh.get("def_mesh")
+            if def_mesh is not None:
+                mesh_data["def_mesh"] = def_mesh
+            # Structural FEM data for tube/wingbox rendering
+            for struct_key in ("radius", "thickness", "fem_origin", "fem_model_type",
+                               "spar_thickness", "skin_thickness"):
+                if struct_key in surf_mesh:
+                    mesh_data[struct_key] = surf_mesh[struct_key]
             break
 
     # Convergence data
