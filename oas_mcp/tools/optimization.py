@@ -82,7 +82,7 @@ async def run_optimization(
     Design variable names (tube only):      'thickness'
     Design variable names (wingbox only):   'spar_thickness', 'skin_thickness'
     Design variable names (multipoint):     'alpha_maneuver', 'fuel_mass'
-    Constraint names (aero):                'CL', 'CD', 'CM'
+    Constraint names (aero):                'CL', 'CD', 'CM', 'S_ref'
     Constraint names (aerostruct):          all aero + 'failure', 'thickness_intersects', 'L_equals_W'
     Constraint names (multipoint):          all aerostruct + 'fuel_vol_delta', 'fuel_diff'
     Objective names (aero):                 'CD', 'CL'

@@ -13,6 +13,8 @@ def build_mesh(
     symmetry: bool,
     offset=None,
     num_twist_cp: int | None = None,
+    span_cos_spacing: float = 0.0,
+    chord_cos_spacing: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """
     Generate a mesh and optional initial twist array.
@@ -29,6 +31,8 @@ def build_mesh(
         "symmetry": symmetry,
         "span": span,
         "root_chord": root_chord,
+        "span_cos_spacing": span_cos_spacing,
+        "chord_cos_spacing": chord_cos_spacing,
     }
     if offset is not None:
         mesh_dict["offset"] = np.asarray(offset, dtype=float)

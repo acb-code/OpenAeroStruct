@@ -319,6 +319,7 @@ _CONSTRAINT_PATH_MAP_AERO: dict[str, str] = {
     "CL": "{point}.{name}_perf.CL",
     "CD": "{point}.{name}_perf.CD",
     "CM": "{point}.CM",
+    "S_ref": "{point}.{name}.S_ref",
 }
 
 # Aerostruct constraint path templates.
@@ -329,6 +330,7 @@ _CONSTRAINT_PATH_MAP_AEROSTRUCT: dict[str, str] = {
     "CL": "{point}.{name}_perf.CL",
     "CD": "{point}.{name}_perf.CD",
     "CM": "{point}.CM",
+    "S_ref": "{point}.{name}.S_ref",
     "failure": "{point}.{name}_perf.failure",
     "thickness_intersects": "{point}.{name}_perf.thickness_intersects",
     "L_equals_W": "{point}.L_equals_W",

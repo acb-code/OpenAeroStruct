@@ -35,6 +35,8 @@ async def create_surface(
     num_x: Annotated[int, "Number of chordwise mesh nodes (>= 2)"] = 2,
     num_y: Annotated[int, "Number of spanwise mesh nodes (must be odd, >= 3)"] = 7,
     symmetry: Annotated[bool, "If True, model only one half of the wing"] = True,
+    span_cos_spacing: Annotated[float, "Spanwise spacing blend: 0=uniform, 1=cosine (bunches at tip), 2-3=cosine at root+tip"] = 0.0,
+    chord_cos_spacing: Annotated[float, "Chordwise spacing blend: 0=uniform, 1=cosine (bunches at LE/TE)"] = 0.0,
     twist_cp: Annotated[list[float] | None, "Twist control-point values in degrees, ordered root-to-tip (None = zero twist)"] = None,
     chord_cp: Annotated[list[float] | None, "Chord control-point scale factors, ordered root-to-tip (None = unit chord)"] = None,
     t_over_c_cp: Annotated[list[float] | None, "Thickness-to-chord ratio control points, ordered root-to-tip (None = [0.15])"] = None,
@@ -112,6 +114,8 @@ async def create_surface(
             symmetry=symmetry,
             offset=offset,
             num_twist_cp=num_twist_cp,
+            span_cos_spacing=span_cos_spacing,
+            chord_cos_spacing=chord_cos_spacing,
         )
 
         # Apply geometric modifications
