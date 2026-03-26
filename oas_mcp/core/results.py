@@ -225,15 +225,28 @@ def extract_standard_detail(
                 "ny": ny,
             }
 
-            # Twist and chord distributions from mesh geometry
+            # Chord distribution from mesh geometry
             le_x = np.asarray(mesh[0, :, 0])
             te_x = np.asarray(mesh[-1, :, 0])
-            le_z = np.asarray(mesh[0, :, 2])
-            te_z = np.asarray(mesh[-1, :, 2])
             chord_arr = te_x - le_x
-            twist_arr = np.degrees(np.arctan2(te_z - le_z, chord_arr))
             sect["chord_m"] = chord_arr[::-1].tolist()   # root-to-tip
-            sect["twist_deg"] = twist_arr[::-1].tolist()  # root-to-tip
+
+            # Twist from OpenMDAO variable (mesh z-coords are zero for CRM)
+            # Aerostruct: {name}.geometry.twist; aero-only: {name}.twist
+            twist_val = None
+            if analysis_type == "aerostruct":
+                twist_val = _try_get(prob, f"{name}.geometry.twist")
+            if twist_val is None:
+                twist_val = _try_get(prob, f"{name}.twist")
+            if twist_val is not None:
+                twist_arr = np.asarray(twist_val).ravel()
+                sect["twist_deg"] = twist_arr[::-1].tolist()  # root-to-tip
+            else:
+                # Fallback: compute from mesh z-coords (non-zero for custom meshes)
+                le_z = np.asarray(mesh[0, :, 2])
+                te_z = np.asarray(mesh[-1, :, 2])
+                twist_arr = np.degrees(np.arctan2(te_z - le_z, chord_arr))
+                sect["twist_deg"] = twist_arr[::-1].tolist()  # root-to-tip
 
             # Structural FEM data for 3D visualisation
             snap = standard["mesh_snapshot"][name]
