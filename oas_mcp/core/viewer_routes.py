@@ -110,10 +110,11 @@ async def viewer_html(request: Request) -> Response:
 
 
 async def sessions_endpoint(request: Request) -> Response:
-    """Return JSON list of all provenance sessions."""
+    """Return JSON list of provenance sessions (scoped to user in OIDC mode)."""
     from oas_mcp.provenance.db import _dumps, list_sessions
 
-    sessions = await asyncio.to_thread(list_sessions)
+    user = _effective_user(request)
+    sessions = await asyncio.to_thread(list_sessions, user=user)
     return Response(
         content=_dumps(sessions),
         status_code=200,
@@ -122,12 +123,21 @@ async def sessions_endpoint(request: Request) -> Response:
 
 
 async def graph_endpoint(request: Request) -> Response:
-    """Return JSON DAG for a given session_id."""
-    from oas_mcp.provenance.db import _dumps, get_session_graph
+    """Return JSON DAG for a given session_id (scoped to user in OIDC mode)."""
+    from oas_mcp.provenance.db import _dumps, get_session_graph, get_session_owner
 
     session_id = request.query_params.get("session_id")
     if not session_id:
         return JSONResponse({"error": "Missing session_id query parameter"}, status_code=400)
+
+    # Check ownership: non-admin users can only view their own sessions
+    # (or sessions with no owner, for backward compat with pre-OIDC data).
+    user = _effective_user(request)
+    if user is not None:
+        owner = await asyncio.to_thread(get_session_owner, session_id)
+        if owner and owner != user:
+            return JSONResponse({"error": "Session not found"}, status_code=404)
+
     try:
         graph = await asyncio.to_thread(get_session_graph, session_id)
     except Exception as exc:

@@ -30,9 +30,11 @@ async def start_session(
     Returns ``{session_id, started_at}``.  Call this at the beginning of a
     workflow to group all subsequent tool calls under a named session.
     """
+    from oas_mcp.core.auth import get_current_user
+
     session_id = f"sess-{uuid.uuid4().hex[:12]}"
     started_at = datetime.now(timezone.utc).isoformat()
-    record_session(session_id, notes=notes)
+    record_session(session_id, notes=notes, user=get_current_user())
     # Set module-level var so all subsequent tool calls (separate asyncio tasks)
     # are recorded under this session.
     set_server_session_id(session_id)

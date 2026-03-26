@@ -196,6 +196,26 @@ Ensure roles appear in the ID token (Keycloak default, but verify):
 1. **Client scopes** (left sidebar) → **roles** → **Mappers** tab → **realm roles**
 2. Confirm **Add to ID token** is **ON**
 
+### 4j. Ensure username in access tokens (recommended)
+
+Clients registered via Dynamic Client Registration (DCR) — such as Claude
+Code and claude.ai — may not include `preferred_username` in access tokens
+by default.  The MCP server works around this by calling the OIDC userinfo
+endpoint when `preferred_username` is missing, but adding the mapper avoids
+the extra HTTP call on every request.
+
+1. **Client scopes** (left sidebar) → **profile** → **Mappers** tab
+2. Find the **username** mapper (or create one if it doesn't exist):
+   - Mapper type: **User Property**
+   - Property: `username`
+   - Token Claim Name: `preferred_username`
+3. Ensure **Add to access token** is **ON**
+4. Click **Save**
+
+This ensures that all access tokens (including those from DCR-registered
+clients) include the human-readable username, so artifacts and provenance
+sessions are stored under the username rather than the Keycloak `sub` UUID.
+
 ## 5. Restart OAS MCP
 
 ```bash
@@ -338,5 +358,6 @@ Then run `codex mcp login oas-mcp` to authenticate.
 | `password authentication failed` on Keycloak start | Stale Postgres volume | `docker volume rm <project>_postgres_data` and restart |
 | Keycloak health check fails | Port 9000 not exposed | Compose uses port 8080 check; verify `--health-enabled=true` in command |
 | Viewer shows login page but callback fails | Wrong redirect URI | Verify `oas-viewer` client has `https://mcp.lakesideai.dev/viewer/callback` in Valid redirect URIs |
-| Viewer login works but user sees "Artifact not found" | Artifact scoping | Regular users only see their own runs; admin needs `oas-admin` role (step 4i) |
+| Viewer login works but user sees "Artifact not found" | Artifact scoping | Regular users only see their own runs; admin needs `oas-admin` role (step 4i). Also check that artifacts aren't stored under a UUID — see note below |
+| Artifacts stored under UUID instead of username | DCR token missing `preferred_username` | The MCP server calls the userinfo endpoint to resolve this automatically. If artifacts were created before this fix, they'll be under a UUID directory. The viewer falls back to an unscoped lookup for these. To prevent this, ensure the `profile` scope's `username` mapper has **Add to access token: ON** (see step 4j) |
 | "Sessions will not survive server restarts" warning | No session secret | Set `OAS_VIEWER_SESSION_SECRET` in `.env` (step 1) |

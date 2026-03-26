@@ -116,8 +116,16 @@ def capture_tool(fn):
         finally:
             duration_s = time.perf_counter() - t0
             try:
-                from .db import _db_path
+                from .db import _db_path, _ensure_session
                 if _db_path is not None:
+                    # Ensure session exists with user attribution before
+                    # recording the tool call (INSERT OR IGNORE — no-op if
+                    # start_session already created the row).
+                    try:
+                        from oas_mcp.core.auth import get_current_user
+                        _ensure_session(session_id, user=get_current_user())
+                    except Exception:
+                        _ensure_session(session_id)
                     seq = _next_seq(session_id)
                     record_tool_call(
                         call_id,

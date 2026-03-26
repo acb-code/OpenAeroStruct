@@ -89,6 +89,9 @@ class OIDCTokenVerifier:
         self._client_secret = client_secret
         self._jwks_client: Any = None  # jwt.PyJWKClient, imported lazily
         self._jwks_lock = threading.Lock()
+        self._userinfo_endpoint: str | None = None  # lazily discovered
+        # sub → preferred_username cache (DCR tokens lack preferred_username)
+        self._username_cache: dict[str, str] = {}
 
     def _get_jwks_client(self) -> Any:
         with self._jwks_lock:
@@ -104,6 +107,58 @@ class OIDCTokenVerifier:
                 logger.info("OIDC JWKS URI discovered: %s", jwks_uri)
                 self._jwks_client = jwt.PyJWKClient(jwks_uri)
         return self._jwks_client
+
+    def _resolve_username(self, token: str, claims: dict[str, Any]) -> str:
+        """Return a human-readable username from JWT claims.
+
+        DCR-registered clients (e.g. Claude Code) often don't include
+        ``preferred_username`` in access tokens.  When it's missing, we
+        call the OIDC userinfo endpoint to retrieve it, caching the
+        result by ``sub``.
+        """
+        username = claims.get("preferred_username") or claims.get("username")
+        if username:
+            return username
+
+        sub = claims.get("sub", "")
+        if not sub:
+            return ""
+
+        # Check cache first
+        cached = self._username_cache.get(sub)
+        if cached:
+            return cached
+
+        # Discover and call the userinfo endpoint
+        try:
+            if self._userinfo_endpoint is None:
+                discovery_url = f"{self._issuer_url}/.well-known/openid-configuration"
+                with urllib.request.urlopen(discovery_url, timeout=10) as resp:
+                    doc = json.loads(resp.read())
+                self._userinfo_endpoint = doc.get("userinfo_endpoint", "")
+
+            if self._userinfo_endpoint:
+                req = urllib.request.Request(
+                    self._userinfo_endpoint,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    userinfo = json.loads(resp.read())
+                username = (
+                    userinfo.get("preferred_username")
+                    or userinfo.get("username")
+                    or sub
+                )
+                self._username_cache[sub] = username
+                logger.info(
+                    "Resolved username via userinfo: sub=%s → %s", sub, username
+                )
+                return username
+        except Exception as exc:
+            logger.warning("Userinfo lookup failed for sub=%s: %s", sub, exc)
+
+        # Final fallback: use sub
+        return sub
 
     def verify(self, token: str) -> dict[str, Any]:
         """Validate *token* and return the decoded JWT claims.
@@ -153,8 +208,10 @@ class OIDCTokenVerifier:
             return None
 
         # Store the username in the contextvar so get_current_user() can read it
-        # within the same async request lifecycle.
-        username = claims.get("preferred_username") or claims.get("sub", "")
+        # within the same async request lifecycle.  For DCR tokens that lack
+        # preferred_username, _resolve_username falls back to the userinfo
+        # endpoint (cached) so artifacts are stored under a human-readable name.
+        username = await asyncio.to_thread(self._resolve_username, token, claims)
         _current_user_ctx.set(username)
 
         return AccessToken(

@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id   TEXT PRIMARY KEY,
     notes        TEXT,
     oas_session_id TEXT,
-    started_at   TEXT NOT NULL
+    started_at   TEXT NOT NULL,
+    user         TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS tool_calls (
@@ -170,6 +171,11 @@ def init_db(db_path: Path | str | None = None) -> None:
 
     conn = _get_conn()
     conn.executescript(_DDL)
+    # Migrate existing DBs that lack the user column.
+    try:
+        conn.execute("SELECT user FROM sessions LIMIT 0")
+    except Exception:
+        conn.execute("ALTER TABLE sessions ADD COLUMN user TEXT DEFAULT ''")
     conn.commit()
 
 
@@ -177,20 +183,21 @@ def record_session(
     session_id: str,
     notes: str = "",
     oas_session_id: str | None = None,
+    user: str = "",
 ) -> None:
     """Insert a new provenance session record (ignore if already exists)."""
     conn = _get_conn()
     conn.execute(
         """
-        INSERT OR IGNORE INTO sessions(session_id, notes, oas_session_id, started_at)
-        VALUES (?, ?, ?, ?)
+        INSERT OR IGNORE INTO sessions(session_id, notes, oas_session_id, started_at, user)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (session_id, notes, oas_session_id, datetime.now(timezone.utc).isoformat()),
+        (session_id, notes, oas_session_id, datetime.now(timezone.utc).isoformat(), user),
     )
     conn.commit()
 
 
-def _ensure_session(session_id: str) -> None:
+def _ensure_session(session_id: str, user: str = "") -> None:
     """Auto-create a session row if one does not already exist.
 
     Satisfies the FK constraint on tool_calls and decisions without requiring
@@ -199,10 +206,10 @@ def _ensure_session(session_id: str) -> None:
     conn = _get_conn()
     conn.execute(
         """
-        INSERT OR IGNORE INTO sessions(session_id, notes, oas_session_id, started_at)
-        VALUES (?, ?, ?, ?)
+        INSERT OR IGNORE INTO sessions(session_id, notes, oas_session_id, started_at, user)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (session_id, "auto-created", None, datetime.now(timezone.utc).isoformat()),
+        (session_id, "auto-created", None, datetime.now(timezone.utc).isoformat(), user),
     )
     conn.commit()
 
@@ -418,12 +425,35 @@ def get_session_graph(session_id: str) -> dict:
     return {"session": session_meta, "nodes": nodes, "edges": edges}
 
 
-def list_sessions() -> list[dict]:
-    """Return all sessions with metadata."""
+def get_session_owner(session_id: str) -> str:
+    """Return the user who owns *session_id*, or ``""`` if unset/not found."""
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM sessions ORDER BY started_at DESC"
-    ).fetchall()
+    row = conn.execute(
+        "SELECT user FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    return row["user"] if row else ""
+
+
+def list_sessions(user: str | None = None) -> list[dict]:
+    """Return sessions with metadata.
+
+    Parameters
+    ----------
+    user:
+        If given, only return sessions owned by this user (or sessions with
+        no user set, for backward compatibility with pre-OIDC data).
+        ``None`` returns all sessions.
+    """
+    conn = _get_conn()
+    if user is not None:
+        rows = conn.execute(
+            "SELECT * FROM sessions WHERE user = ? OR user = '' ORDER BY started_at DESC",
+            (user,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM sessions ORDER BY started_at DESC"
+        ).fetchall()
     result = []
     for r in rows:
         d = dict(r)

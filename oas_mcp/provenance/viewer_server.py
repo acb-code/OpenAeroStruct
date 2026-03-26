@@ -63,6 +63,10 @@ def generate_plot_png(run_id: str, plot_type: str, *, user: str | None = None) -
 
     store = ArtifactStore()
     artifact = store.get(run_id, user=user)
+    if artifact is None and user is not None:
+        # Fallback: artifact may have been created before per-user scoping
+        # was enabled (stored under a different username).
+        artifact = store.get(run_id)
     if artifact is None:
         return None
 
@@ -140,6 +144,8 @@ def get_plot_types_for_run(run_id: str, *, user: str | None = None) -> list[str]
 
     store = ArtifactStore()
     summary = store.get_summary(run_id, user=user)
+    if summary is None and user is not None:
+        summary = store.get_summary(run_id)
     if summary is None:
         return None
     analysis_type = summary.get("analysis_type", "aero")
@@ -160,6 +166,8 @@ def generate_dashboard_html(run_id: str, *, user: str | None = None) -> str | No
 
     store = ArtifactStore()
     artifact = store.get(run_id, user=user)
+    if artifact is None and user is not None:
+        artifact = store.get(run_id)
     if artifact is None:
         return None
 
