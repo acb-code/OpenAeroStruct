@@ -276,7 +276,7 @@ class TestDashboardStarletteRoute:
         }):
             from oas_mcp.core.viewer_routes import build_viewer_app
 
-            app = build_viewer_app()
+            app, _mode = build_viewer_app()
             assert app is not None
             route_paths = [r.path for r in app.routes]
             assert "/dashboard" in route_paths

@@ -404,9 +404,15 @@ def main():
 
         _warn_if_unauthenticated(args.host, args.port)
         mcp_asgi = mcp.streamable_http_app()
-        viewer_app = build_viewer_app()
+        viewer_app, auth_mode = build_viewer_app()
 
         if viewer_app is not None:
+            # Run OIDC discovery before starting the server (if OIDC mode).
+            if auth_mode == "oidc":
+                import asyncio as _asyncio
+                from .core.viewer_auth import discover_oidc_endpoints
+                _asyncio.run(discover_oidc_endpoints(viewer_app.state.oidc_config))
+
             # Compose viewer + MCP: viewer handles its known paths,
             # everything else falls through to the MCP ASGI app.
             from .core.viewer_routes import make_fallback_app
@@ -417,7 +423,10 @@ def main():
             print("  OAS Provenance Viewer (HTTP transport)", file=_sys.stderr)
             print(_sep, file=_sys.stderr)
             print(f"  Viewer    http://{args.host}:{args.port}/viewer", file=_sys.stderr)
-            print(f"            Protected by Basic Auth (OAS_VIEWER_USER/PASSWORD)", file=_sys.stderr)
+            if auth_mode == "oidc":
+                print(f"            Protected by OIDC ({viewer_app.state.oidc_config.issuer_url})", file=_sys.stderr)
+            else:
+                print(f"            Protected by Basic Auth (OAS_VIEWER_USER/PASSWORD)", file=_sys.stderr)
             print(_sep + "\n", file=_sys.stderr)
         else:
             app = mcp_asgi

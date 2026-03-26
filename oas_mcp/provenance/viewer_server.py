@@ -40,11 +40,17 @@ ANALYSIS_PLOT_TYPES: dict[str, list[str]] = {
 }
 
 
-def generate_plot_png(run_id: str, plot_type: str) -> bytes | None:
+def generate_plot_png(run_id: str, plot_type: str, *, user: str | None = None) -> bytes | None:
     """Load an artifact by run_id and return a rendered PNG as bytes.
 
     Returns None if the artifact is not found.
     Raises ValueError for invalid plot_type or if matplotlib is unavailable.
+
+    Parameters
+    ----------
+    user:
+        If given, restrict the artifact lookup to this user's directory.
+        ``None`` (the default) searches all users.
     """
     from oas_mcp.core.artifacts import ArtifactStore
     from oas_mcp.core.plotting import PLOT_TYPES, generate_plot
@@ -56,7 +62,7 @@ def generate_plot_png(run_id: str, plot_type: str) -> bytes | None:
         )
 
     store = ArtifactStore()
-    artifact = store.get(run_id)
+    artifact = store.get(run_id, user=user)
     if artifact is None:
         return None
 
@@ -122,27 +128,38 @@ def generate_plot_png(run_id: str, plot_type: str) -> bytes | None:
     return plot_result.image.data
 
 
-def get_plot_types_for_run(run_id: str) -> list[str] | None:
-    """Return applicable plot types for a run, or None if not found."""
+def get_plot_types_for_run(run_id: str, *, user: str | None = None) -> list[str] | None:
+    """Return applicable plot types for a run, or None if not found.
+
+    Parameters
+    ----------
+    user:
+        If given, restrict the lookup to this user's artifacts.
+    """
     from oas_mcp.core.artifacts import ArtifactStore
 
     store = ArtifactStore()
-    summary = store.get_summary(run_id)
+    summary = store.get_summary(run_id, user=user)
     if summary is None:
         return None
     analysis_type = summary.get("analysis_type", "aero")
     return ANALYSIS_PLOT_TYPES.get(analysis_type, ["lift_distribution", "planform"])
 
 
-def generate_dashboard_html(run_id: str) -> str | None:
+def generate_dashboard_html(run_id: str, *, user: str | None = None) -> str | None:
     """Generate a context-rich HTML dashboard for a given run_id.
 
     Returns None if the artifact is not found.
+
+    Parameters
+    ----------
+    user:
+        If given, restrict the lookup to this user's artifacts.
     """
     from oas_mcp.core.artifacts import ArtifactStore
 
     store = ArtifactStore()
-    artifact = store.get(run_id)
+    artifact = store.get(run_id, user=user)
     if artifact is None:
         return None
 

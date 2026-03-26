@@ -23,7 +23,19 @@ OIDC_ISSUER_URL=https://auth.lakesideai.dev/realms/oas
 OIDC_CLIENT_ID=oas-mcp
 OIDC_CLIENT_SECRET=          # fill after step 4b below
 RESOURCE_SERVER_URL=https://mcp.lakesideai.dev
+
+# Viewer auth (OIDC session-based login for /viewer, /dashboard, /plot, etc.)
+OAS_VIEWER_OIDC_CLIENT_ID=oas-viewer
+OAS_VIEWER_OIDC_CLIENT_SECRET=  # fill after step 4h below
+OAS_VIEWER_SESSION_SECRET=      # generate with: python -c "import secrets; print(secrets.token_hex(32))"
+OAS_VIEWER_ADMIN_ROLE=oas-admin
 ```
+
+> **Note:** The viewer supports two auth modes. If the OIDC viewer vars above
+> are set, users log in via Keycloak and get per-user artifact scoping. If only
+> `OAS_VIEWER_USER` + `OAS_VIEWER_PASSWORD` are set (legacy), a single shared
+> Basic Auth credential protects the viewer with no per-user scoping. OIDC mode
+> takes priority when both are configured.
 
 ## 2. Caddy config
 
@@ -141,6 +153,49 @@ By default, Keycloak doesn't include the `oas-mcp` client ID in the token's
 5. Add to access token: **ON**
 6. Click **Save**
 
+### 4h. Create viewer client
+
+The viewer (dashboard, plots, provenance graphs at `/viewer`, `/dashboard`,
+`/plot`, etc.) uses a separate OIDC client with the Authorization Code flow
+so that users authenticate via Keycloak login in the browser.
+
+1. **Clients → Create client**
+2. Client ID: `oas-viewer`
+3. Client authentication: **ON** (confidential)
+4. Authentication flow: check **Standard flow** only (no service accounts needed)
+5. Click **Next**, then **Save**
+6. Go to **Credentials** tab → copy the **Client secret** → paste into `.env` as `OAS_VIEWER_OIDC_CLIENT_SECRET`
+
+In the client's **Settings** tab:
+
+- **Valid redirect URIs**: `https://mcp.lakesideai.dev/viewer/callback`
+- **Valid post logout redirect URIs**: `https://mcp.lakesideai.dev/viewer`
+- **Web origins**: `https://mcp.lakesideai.dev`
+
+No custom scopes needed — the viewer uses the default `openid profile email`
+scopes and reads realm roles from the ID token.
+
+### 4i. Create admin role for the viewer
+
+Users with the `oas-admin` realm role can view all users' artifacts in the
+viewer. Regular users only see their own runs.
+
+1. **Realm roles** (left sidebar) → **Create role**
+2. Name: `oas-admin`
+3. Click **Save**
+4. Assign to admin users:
+   - **Users** → select the user → **Role mappings** tab → **Assign role**
+   - In the dialog, change the filter dropdown from **Filter by clients** to
+     **Filter by realm roles** — `oas-admin` will now appear in the list
+   - Select `oas-admin` → click **Assign**
+
+> The role name must match `OAS_VIEWER_ADMIN_ROLE` in `.env` (default: `oas-admin`).
+
+Ensure roles appear in the ID token (Keycloak default, but verify):
+
+1. **Client scopes** (left sidebar) → **roles** → **Mappers** tab → **realm roles**
+2. Confirm **Add to ID token** is **ON**
+
 ## 5. Restart OAS MCP
 
 ```bash
@@ -210,9 +265,15 @@ Then run `codex mcp login oas-mcp` to authenticate.
 ### Admin steps
 
 1. Open **https://auth.lakesideai.dev** → log in as admin → switch to the **oas** realm
+   (see the project README for how to temporarily unblock admin access in Caddy)
 2. **Users → Add user** → fill in username, email, first/last name → **Create**
 3. **Credentials** tab → **Set password** → uncheck "Temporary" → **Save**
-4. Send the new user their username, temporary password, and the instructions below
+4. *(Optional)* Grant admin viewer access: **Role mappings** tab → **Assign role** →
+   change the filter from **Filter by clients** to **Filter by realm roles** →
+   select `oas-admin` → **Assign**
+   - Without this role, the user can only see their own analysis artifacts in the viewer
+   - With this role, they can see all users' artifacts
+5. Send the new user their username, temporary password, and the instructions below
 
 ### Instructions to send new users
 
@@ -257,6 +318,15 @@ Then run `codex mcp login oas-mcp` to authenticate.
 >    ```
 > 4. Your browser will open for login. Sign in with your credentials above.
 > 5. Start a Codex session — the OAS tools will be available automatically.
+>
+> **Viewing dashboards and plots**
+>
+> After running an analysis, you'll get a `run_id`. View the results at:
+> - Dashboard: `https://mcp.lakesideai.dev/dashboard?run_id=<run_id>`
+> - Provenance: `https://mcp.lakesideai.dev/viewer?session_id=<session_id>`
+>
+> You'll be prompted to log in with the same credentials. You can only
+> see your own analysis results (admins can see all users' results).
 
 ## Troubleshooting
 
@@ -267,3 +337,6 @@ Then run `codex mcp login oas-mcp` to authenticate.
 | JWT audience validation fails | Missing audience mapper | Add the audience mapper to the `mcp:tools` scope (step 4g) |
 | `password authentication failed` on Keycloak start | Stale Postgres volume | `docker volume rm <project>_postgres_data` and restart |
 | Keycloak health check fails | Port 9000 not exposed | Compose uses port 8080 check; verify `--health-enabled=true` in command |
+| Viewer shows login page but callback fails | Wrong redirect URI | Verify `oas-viewer` client has `https://mcp.lakesideai.dev/viewer/callback` in Valid redirect URIs |
+| Viewer login works but user sees "Artifact not found" | Artifact scoping | Regular users only see their own runs; admin needs `oas-admin` role (step 4i) |
+| "Sessions will not survive server restarts" warning | No session secret | Set `OAS_VIEWER_SESSION_SECRET` in `.env` (step 1) |

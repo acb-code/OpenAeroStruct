@@ -1,7 +1,16 @@
 """Starlette sub-application serving the provenance DAG viewer.
 
 Mounted on the main HTTP app (port 8000) when ``--transport http`` is active
-and ``OAS_VIEWER_USER`` + ``OAS_VIEWER_PASSWORD`` env vars are both set.
+and one of the following auth modes is configured:
+
+* **OIDC mode** (preferred): ``OAS_VIEWER_OIDC_CLIENT_SECRET`` is set and
+  ``OIDC_ISSUER_URL`` points to a Keycloak (or other OIDC) realm.  Users log
+  in via the Keycloak login page; a signed session cookie tracks identity.
+  Artifact access is scoped per user (admin role sees all).
+
+* **Basic Auth mode** (fallback): ``OAS_VIEWER_USER`` + ``OAS_VIEWER_PASSWORD``
+  env vars are both set.  A single shared credential protects the viewer.
+  No per-user artifact scoping.
 
 Routes mirror those of the legacy ``viewer_server.py`` daemon thread so the
 viewer HTML/JS works unchanged.
@@ -25,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Basic Auth helpers
+# Basic Auth helpers (fallback mode)
 # ---------------------------------------------------------------------------
 
 def _check_basic_auth(request: Request, username: str, password: str) -> bool:
@@ -45,7 +54,7 @@ def _check_basic_auth(request: Request, username: str, password: str) -> bool:
     )
 
 
-def _require_auth(handler):
+def _require_basic_auth(handler):
     """Decorator that enforces Basic Auth on a Starlette endpoint."""
 
     async def wrapper(request: Request) -> Response:
@@ -64,10 +73,32 @@ def _require_auth(handler):
 
 
 # ---------------------------------------------------------------------------
-# Endpoint handlers
+# Helpers for extracting effective user from the request
 # ---------------------------------------------------------------------------
 
-@_require_auth
+def _effective_user(request: Request) -> str | None:
+    """Return the user to scope artifact lookups to, or ``None`` for all.
+
+    In OIDC mode, regular users are scoped to their own artifacts; admins
+    see everything (``None``).  In Basic Auth mode, returns ``None`` (no
+    per-user scoping).
+    """
+    from oas_mcp.core.viewer_auth import get_viewer_user, is_viewer_admin
+
+    user = get_viewer_user(request)
+    if not user:
+        return None  # Basic Auth mode — no per-user scoping
+    if is_viewer_admin(request):
+        return None  # Admin sees all
+    return user
+
+
+# ---------------------------------------------------------------------------
+# Endpoint handlers
+# ---------------------------------------------------------------------------
+# These are *undecorated* — the auth decorator is applied at app-build time
+# depending on the auth mode.
+
 async def viewer_html(request: Request) -> Response:
     """Serve the viewer/index.html page."""
     from oas_mcp.provenance.viewer_server import VIEWER_HTML
@@ -78,7 +109,6 @@ async def viewer_html(request: Request) -> Response:
     return HTMLResponse(content)
 
 
-@_require_auth
 async def sessions_endpoint(request: Request) -> Response:
     """Return JSON list of all provenance sessions."""
     from oas_mcp.provenance.db import _dumps, list_sessions
@@ -91,7 +121,6 @@ async def sessions_endpoint(request: Request) -> Response:
     )
 
 
-@_require_auth
 async def graph_endpoint(request: Request) -> Response:
     """Return JSON DAG for a given session_id."""
     from oas_mcp.provenance.db import _dumps, get_session_graph
@@ -110,7 +139,6 @@ async def graph_endpoint(request: Request) -> Response:
     )
 
 
-@_require_auth
 async def plot_endpoint(request: Request) -> Response:
     """Render a saved analysis run as a PNG image."""
     from oas_mcp.provenance.viewer_server import generate_plot_png
@@ -121,8 +149,9 @@ async def plot_endpoint(request: Request) -> Response:
         return JSONResponse(
             {"error": "Missing run_id or plot_type query parameters"}, status_code=400
         )
+    user = _effective_user(request)
     try:
-        png_bytes = await asyncio.to_thread(generate_plot_png, run_id, plot_type)
+        png_bytes = await asyncio.to_thread(generate_plot_png, run_id, plot_type, user=user)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as exc:
@@ -135,7 +164,6 @@ async def plot_endpoint(request: Request) -> Response:
     return Response(content=png_bytes, status_code=200, media_type="image/png")
 
 
-@_require_auth
 async def dashboard_endpoint(request: Request) -> Response:
     """Serve a context-rich HTML dashboard for a given run_id."""
     from oas_mcp.provenance.viewer_server import generate_dashboard_html
@@ -143,8 +171,9 @@ async def dashboard_endpoint(request: Request) -> Response:
     run_id = request.query_params.get("run_id")
     if not run_id:
         return JSONResponse({"error": "Missing run_id query parameter"}, status_code=400)
+    user = _effective_user(request)
     try:
-        html = await asyncio.to_thread(generate_dashboard_html, run_id)
+        html = await asyncio.to_thread(generate_dashboard_html, run_id, user=user)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -155,7 +184,6 @@ async def dashboard_endpoint(request: Request) -> Response:
     return HTMLResponse(html)
 
 
-@_require_auth
 async def plot_types_endpoint(request: Request) -> Response:
     """Return JSON list of applicable plot types for a run."""
     from oas_mcp.provenance.viewer_server import get_plot_types_for_run
@@ -163,8 +191,9 @@ async def plot_types_endpoint(request: Request) -> Response:
     run_id = request.query_params.get("run_id")
     if not run_id:
         return JSONResponse({"error": "Missing run_id query parameter"}, status_code=400)
+    user = _effective_user(request)
     try:
-        types = await asyncio.to_thread(get_plot_types_for_run, run_id)
+        types = await asyncio.to_thread(get_plot_types_for_run, run_id, user=user)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -176,35 +205,113 @@ async def plot_types_endpoint(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
+# OIDC-specific route handlers (login, callback, logout)
+# ---------------------------------------------------------------------------
+
+def _build_oidc_routes(config):
+    """Return Route objects for the OIDC login/callback/logout endpoints."""
+    from oas_mcp.core.viewer_auth import handle_callback, handle_logout, login_redirect
+
+    async def login_endpoint(request: Request) -> Response:
+        return login_redirect(request, config)
+
+    async def callback_endpoint(request: Request) -> Response:
+        return await handle_callback(request, config)
+
+    async def logout_endpoint(request: Request) -> Response:
+        return await handle_logout(request, config)
+
+    return [
+        Route("/viewer/login", login_endpoint),
+        Route("/viewer/callback", callback_endpoint),
+        Route("/viewer/logout", logout_endpoint),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
-def build_viewer_app() -> Starlette | None:
-    """Build and return the viewer Starlette app, or None if auth is unconfigured.
+def _wrap_handlers(decorator):
+    """Apply *decorator* to every content-serving handler and return a route list."""
+    return [
+        Route("/viewer", decorator(viewer_html)),
+        Route("/viewer/", decorator(viewer_html)),
+        Route("/sessions", decorator(sessions_endpoint)),
+        Route("/graph", decorator(graph_endpoint)),
+        Route("/plot", decorator(plot_endpoint)),
+        Route("/plot_types", decorator(plot_types_endpoint)),
+        Route("/dashboard", decorator(dashboard_endpoint)),
+        Route("/dashboard/", decorator(dashboard_endpoint)),
+    ]
 
-    When either ``OAS_VIEWER_USER`` or ``OAS_VIEWER_PASSWORD`` is unset the
-    viewer is intentionally **not** mounted to avoid accidental public exposure.
+
+def build_viewer_app() -> tuple[Starlette | None, str]:
+    """Build and return ``(viewer_app, auth_mode)`` or ``(None, "")``.
+
+    Auth mode priority:
+      1. OIDC (if ``OIDC_ISSUER_URL`` + ``OAS_VIEWER_OIDC_CLIENT_SECRET`` set)
+      2. Basic Auth (if ``OAS_VIEWER_USER`` + ``OAS_VIEWER_PASSWORD`` set)
+      3. Disabled (viewer not mounted)
+
+    Returns
+    -------
+    tuple
+        ``(Starlette app, "oidc"|"basic")`` on success, or ``(None, "")``
+        when the viewer is disabled.
     """
+    from oas_mcp.core.viewer_auth import build_viewer_oidc_config, require_viewer_oidc
+
+    oidc_config = build_viewer_oidc_config()
+
+    if oidc_config is not None:
+        # --- OIDC mode ---
+        oidc_decorator = require_viewer_oidc(oidc_config)
+        routes = _wrap_handlers(oidc_decorator) + _build_oidc_routes(oidc_config)
+
+        resource_server_url = os.environ.get(
+            "RESOURCE_SERVER_URL", "http://localhost:8000"
+        )
+        https_only = resource_server_url.startswith("https")
+
+        from starlette.middleware.sessions import SessionMiddleware
+
+        app = Starlette(
+            routes=routes,
+            middleware=[
+                Middleware(
+                    SessionMiddleware,
+                    secret_key=oidc_config.session_secret,
+                    session_cookie="oas_viewer_session",
+                    same_site="lax",
+                    https_only=https_only,
+                    max_age=86400,  # 24 hours
+                ),
+                Middleware(
+                    CORSMiddleware,
+                    allow_origins=[resource_server_url.rstrip("/")],
+                    allow_methods=["GET"],
+                    allow_credentials=True,
+                ),
+            ],
+        )
+        # Stash config on app state for use by on_startup handler.
+        app.state.oidc_config = oidc_config
+        return app, "oidc"
+
+    # --- Basic Auth fallback ---
     viewer_user = os.environ.get("OAS_VIEWER_USER", "")
     viewer_password = os.environ.get("OAS_VIEWER_PASSWORD", "")
 
     if not viewer_user or not viewer_password:
         logger.warning(
-            "Set OAS_VIEWER_USER and OAS_VIEWER_PASSWORD to enable the "
-            "provenance viewer on the HTTP transport."
+            "Set OAS_VIEWER_OIDC_CLIENT_SECRET (for OIDC) or "
+            "OAS_VIEWER_USER + OAS_VIEWER_PASSWORD (for Basic Auth) "
+            "to enable the provenance viewer on the HTTP transport."
         )
-        return None
+        return None, ""
 
-    routes = [
-        Route("/viewer", viewer_html),
-        Route("/viewer/", viewer_html),
-        Route("/sessions", sessions_endpoint),
-        Route("/graph", graph_endpoint),
-        Route("/plot", plot_endpoint),
-        Route("/plot_types", plot_types_endpoint),
-        Route("/dashboard", dashboard_endpoint),
-        Route("/dashboard/", dashboard_endpoint),
-    ]
+    routes = _wrap_handlers(_require_basic_auth)
 
     app = Starlette(
         routes=routes,
@@ -219,11 +326,16 @@ def build_viewer_app() -> Starlette | None:
     )
     app.state.viewer_user = viewer_user
     app.state.viewer_password = viewer_password
-    return app
+    return app, "basic"
 
 
 # Paths the viewer app handles — used by the fallback dispatcher.
-_VIEWER_PATHS = frozenset({"/viewer", "/viewer/", "/sessions", "/graph", "/plot", "/plot_types", "/dashboard", "/dashboard/"})
+_VIEWER_PATHS = frozenset({
+    "/viewer", "/viewer/",
+    "/viewer/login", "/viewer/callback", "/viewer/logout",
+    "/sessions", "/graph", "/plot", "/plot_types",
+    "/dashboard", "/dashboard/",
+})
 
 
 def make_fallback_app(viewer_app: Starlette, fallback_app) -> Starlette:
