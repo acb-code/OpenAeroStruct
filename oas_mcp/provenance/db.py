@@ -17,6 +17,7 @@ enabled so readers do not block writers.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import threading
@@ -40,14 +41,30 @@ _local = threading.local()
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_for_json(obj: Any) -> Any:
+    """Replace inf/nan with JSON-safe values, recursing into containers."""
+    if isinstance(obj, float):
+        if math.isinf(obj) or math.isnan(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
+
+
 class _NumpyEncoder(json.JSONEncoder):
     def default(self, obj: Any) -> Any:
         if isinstance(obj, np.ndarray):
-            return obj.tolist()
+            return _sanitize_for_json(obj.tolist())
         if isinstance(obj, np.integer):
             return int(obj)
         if isinstance(obj, np.floating):
-            return float(obj)
+            val = float(obj)
+            if math.isinf(val) or math.isnan(val):
+                return None
+            return val
         if isinstance(obj, np.bool_):
             return bool(obj)
         # str() fallback for any other un-serialisable object
@@ -55,8 +72,11 @@ class _NumpyEncoder(json.JSONEncoder):
 
 
 def _dumps(obj: Any) -> str:
-    # Do NOT pass default= here — it would override _NumpyEncoder.default()
-    return json.dumps(obj, cls=_NumpyEncoder)
+    # Sanitize inf/nan in plain Python containers before encoding — the
+    # encoder's default() only fires for non-native types, so plain
+    # float('inf') would otherwise slip through as the non-standard
+    # ``Infinity`` literal that breaks JSON.parse() in browsers.
+    return json.dumps(_sanitize_for_json(obj), cls=_NumpyEncoder)
 
 
 # ---------------------------------------------------------------------------
