@@ -89,10 +89,15 @@ mcp = FastMCP(
     instructions="""OpenAeroStruct aerostructural analysis and optimisation server.
 
 REQUIRED WORKFLOW — always follow this order:
-  1. create_surface  — define geometry (call once per surface; must precede any analysis)
+  0. start_session     — begin a provenance session (call once at workflow start)
+  1. create_surface    — define geometry (call once per surface; must precede any analysis)
+     log_decision      — record mesh/geometry choices (decision_type="mesh_resolution")
   2. run_aero_analysis / run_aerostruct_analysis / compute_drag_polar / etc. — analyse
+     log_decision      — interpret results (decision_type="result_interpretation", prior_call_id=…)
   3. run_optimization (optional) — optimise design variables
-  4. reset (optional) — clear state between unrelated experiments
+     log_decision      — before: dv_selection + constraint_choice; after: convergence_assessment
+  4. export_session_graph — save the provenance DAG at workflow end
+  5. reset (optional)  — clear state between unrelated experiments
 
 CRITICAL CONSTRAINTS:
   • num_y must be ODD (3, 5, 7, 9, …). Passing an even value raises an error.
@@ -199,6 +204,22 @@ Use the prompts (analyze_wing, aerostructural_design, optimize_wing, compare_des
 workflows, and the resources (oas://reference, oas://workflows) for quick lookup.
 
 PROVENANCE & DECISION LOGGING:
+  Agents MUST call log_decision at these decision points during every workflow:
+  • After create_surface:        decision_type="mesh_resolution"
+                                  — why this num_x / num_y / wing_type was chosen
+  • After any analysis tool:     decision_type="result_interpretation"
+                                  — what the results mean and what to do next
+                                  — pass prior_call_id from the analysis _provenance.call_id
+  • Before run_optimization:     decision_type="dv_selection"
+                                  — why these design variables and bounds
+  • Before run_optimization:     decision_type="constraint_choice"
+                                  — why these constraints and targets
+  • After run_optimization:      decision_type="convergence_assessment"
+                                  — did it converge, is the result trustworthy
+                                  — pass prior_call_id from the optimization _provenance.call_id
+  Always pass prior_call_id when the decision is directly informed by a specific tool result.
+
+  Tool signatures:
   • start_session(notes)           — begin a named provenance session; call at workflow start
   • log_decision(type, reasoning, selected_action, prior_call_id?, confidence?) — record why
   • export_session_graph(session_id?, output_path?) — export DAG as JSON; load into viewer""",

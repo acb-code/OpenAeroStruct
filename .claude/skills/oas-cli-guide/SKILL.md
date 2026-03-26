@@ -373,6 +373,18 @@ Use these standard `decision_type` values with `log_decision`:
 | `result_interpretation` | Explaining what a result means and next steps |
 | `convergence_assessment` | Assessing whether an optimizer converged |
 
+### Required decision points
+
+Agents MUST call `log_decision` at each of these points during a workflow:
+
+| After this step | `decision_type` | `prior_call_id`? |
+|-----------------|-----------------|------------------|
+| `create_surface` | `mesh_resolution` | No |
+| Any analysis tool | `result_interpretation` | Yes — from `_provenance.call_id` |
+| Before `run_optimization` | `dv_selection` | Optional |
+| Before `run_optimization` | `constraint_choice` | Optional |
+| After `run_optimization` | `convergence_assessment` | Yes — from `_provenance.call_id` |
+
 ### Chaining prior_call_id
 
 Every successful tool call returns a `_provenance` field in its result dict:
