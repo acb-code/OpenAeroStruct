@@ -1202,7 +1202,7 @@ def _draw_wingbox_structure(ax, mesh, spar_thickness, skin_thickness, fem_origin
     for i in range(len(spar_t)):
         # Rectangular panel along spar between nodes i and i+1
         # Width = fraction of local chord for visibility
-        half_h = max(chords[i], chords[i + 1]) * 0.02  # half-height of panel
+        half_h = max(chords[i], chords[i + 1]) * 0.08  # half-height of panel
         x_c0, x_c1 = comp[i], comp[i + 1]
         z0 = fem_origin * (mesh[-1, i, 2] - mesh[0, i, 2]) + mesh[0, i, 2]
         z1 = fem_origin * (mesh[-1, i + 1, 2] - mesh[0, i + 1, 2]) + mesh[0, i + 1, 2]
