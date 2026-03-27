@@ -111,20 +111,23 @@ Then assign it to the `oas-mcp` client:
 1. Go to **Clients → oas-mcp → Client scopes** tab
 2. Click **Add client scope** → select `mcp:tools` → Add as **Default**
 
-### 4e. Remove Trusted Hosts DCR policy
+### 4e. Remove restrictive DCR policies
 
-Keycloak's default "Trusted Hosts" policy blocks DCR requests from
-Claude Code and claude.ai because their requests don't originate from
-a whitelisted host.
+Keycloak's default anonymous access policies block DCR requests from
+Claude Code and claude.ai. Two policies must be deleted:
 
 1. **Clients** (left sidebar) → **Client registration** tab (top of the page)
-2. Under **Anonymous access policies**, find **Trusted Hosts**
-3. **Delete it** (click the trash icon)
+2. Under **Anonymous access policies**, delete both:
+   - **Trusted Hosts** — blocks DCR from non-whitelisted hosts
+   - **Allowed Client Scopes** — blocks the custom `mcp:tools` scope
+     (and `openid`, which Keycloak treats as implicit and doesn't list
+     in its own dropdown, causing DCR to fail with
+     "Not permitted to use specified clientScope")
+3. Click the trash icon on each
 
-> Keycloak enables anonymous DCR by default for new realms. Removing this
-> policy allows any client to register. This is safe because the MCP server
-> validates every token independently — DCR registration alone grants no
-> access.
+> Removing these policies allows any client to register via DCR. This is
+> safe because the MCP server validates every token independently — DCR
+> registration alone grants no access.
 
 Verify DCR works:
 
@@ -353,7 +356,8 @@ Then run `codex mcp login oas-mcp` to authenticate.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `Token rejected: missing required scope 'mcp:tools'` | Scope not in token | Check **Include in token scope** is ON in the `mcp:tools` client scope settings (step 4d) |
-| `Policy 'Trusted Hosts' rejected request` | DCR blocked | Delete the Trusted Hosts policy (step 4e) |
+| `Policy 'Trusted Hosts' rejected request` | DCR blocked by host policy | Delete the Trusted Hosts policy (step 4e) |
+| `Policy 'Allowed Client Scopes' rejected request` / "Not permitted to use specified clientScope" | DCR blocked by scope policy — `openid` is implicit in Keycloak and not in the policy dropdown, so it always fails | Delete the Allowed Client Scopes policy (step 4e) |
 | JWT audience validation fails | Missing audience mapper | Add the audience mapper to the `mcp:tools` scope (step 4g) |
 | `password authentication failed` on Keycloak start | Stale Postgres volume | `docker volume rm <project>_postgres_data` and restart |
 | Keycloak health check fails | Port 9000 not exposed | Compose uses port 8080 check; verify `--health-enabled=true` in command |
