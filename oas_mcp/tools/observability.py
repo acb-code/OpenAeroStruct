@@ -12,7 +12,7 @@ from ..core.auth import get_current_user
 from ..core.plotting import PLOT_TYPES, generate_n2, generate_plot
 from ..core.telemetry import get_run_logs
 from ..core.widget import extract_plot_data
-from ._helpers import _get_viewer_base_url, _resolve_run_id
+from ._helpers import _get_viewer_base_url, _resolve_run_id, _suppress_output
 from ._state import artifacts as _artifacts, sessions as _sessions
 
 
@@ -281,9 +281,23 @@ async def visualize(
 
         prob = session.get_cached_problem(surfaces, analysis_type) if session else None
         if prob is None:
-            raise ValueError(
-                f"No cached OpenMDAO Problem for run '{run_id}'. "
-                "Re-run the analysis in the current session, then call visualize again."
+            # Attempt rebuild from persisted surface dicts
+            from ..core.builders import rebuild_problem_for_n2
+
+            persisted_surface_dicts = artifact.get("results", {}).get("_surface_dicts")
+            if persisted_surface_dicts is None:
+                raise ValueError(
+                    f"No cached OpenMDAO Problem for run '{run_id}' and this "
+                    "artifact was saved before surface-dict persistence was added. "
+                    "Re-run the analysis, then call visualize again."
+                )
+            parameters = artifact_meta.get("parameters", {})
+            prob = await asyncio.to_thread(
+                _suppress_output,
+                rebuild_problem_for_n2,
+                persisted_surface_dicts,
+                analysis_type,
+                parameters,
             )
         output_dir = _artifacts._data_dir / _user / _project / sid
         n2_result = await asyncio.to_thread(generate_n2, prob, run_id, case_name, output_dir)

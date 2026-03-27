@@ -72,6 +72,27 @@ def _get_viewer_base_url() -> str | None:
     return None
 
 
+def _sanitize_surface_dicts(surface_dicts: list[dict]) -> list[dict]:
+    """Strip complex dtypes from surface dicts so they survive JSON round-trip.
+
+    OpenMDAO's complex-step setup can leave complex-valued arrays or scalars
+    in the surface dicts (e.g. wingbox thickness parameters).  We only need
+    real parts for rebuilding the problem structure.
+    """
+    sanitized = []
+    for sd in surface_dicts:
+        clean: dict[str, Any] = {}
+        for k, v in sd.items():
+            if isinstance(v, np.ndarray) and np.issubdtype(v.dtype, np.complexfloating):
+                clean[k] = v.real.copy()
+            elif isinstance(v, complex):
+                clean[k] = v.real
+            else:
+                clean[k] = v
+        sanitized.append(clean)
+    return sanitized
+
+
 def _suppress_output(func, *args, **kwargs):
     """Run func(*args, **kwargs) while suppressing stdout/stderr and OpenMDAO warnings."""
     buf = io.StringIO()
@@ -203,6 +224,8 @@ async def _finalize_analysis(
 
     # Build results payload for artifact storage
     results_to_save = dict(results)
+    if surface_dicts:
+        results_to_save["_surface_dicts"] = _sanitize_surface_dicts(surface_dicts)
     if standard_detail:
         results_to_save["standard_detail"] = standard_detail
     conv_data = session.get_convergence(run_id)

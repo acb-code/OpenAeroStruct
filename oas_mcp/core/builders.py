@@ -279,6 +279,70 @@ def build_aerostruct_problem(
 
 
 # ---------------------------------------------------------------------------
+# Problem rebuild for N2 diagrams (no run_model)
+# ---------------------------------------------------------------------------
+
+# Keys in a surface dict that are numpy arrays when built in-memory but
+# become plain lists after JSON round-tripping through artifact storage.
+_ARRAY_KEYS = frozenset({
+    "mesh", "twist_cp", "chord_cp", "t_over_c_cp",
+    "thickness_cp", "spar_thickness_cp", "skin_thickness_cp",
+    "data_x_upper", "data_y_upper", "data_x_lower", "data_y_lower",
+    "radius_cp", "taper", "sweep",
+})
+
+
+def rebuild_problem_for_n2(
+    surface_dicts: list[dict],
+    analysis_type: str,
+    parameters: dict,
+) -> om.Problem:
+    """Rebuild a setup-only Problem from persisted surface dicts and parameters.
+
+    Used to generate N2 diagrams when the in-memory cache has been evicted.
+    Only calls ``setup()`` — does NOT call ``run_model()``.
+    """
+    restored = []
+    for sd in surface_dicts:
+        s = dict(sd)
+        for key in _ARRAY_KEYS:
+            if key in s and isinstance(s[key], list):
+                s[key] = np.array(s[key])
+        restored.append(s)
+
+    if analysis_type in ("aero", "drag_polar", "stability"):
+        return build_aero_problem(
+            surfaces=restored,
+            velocity=parameters.get("velocity", 248.136),
+            alpha=parameters.get("alpha", 5.0),
+            Mach_number=parameters.get("Mach_number", 0.84),
+            reynolds_number=parameters.get("reynolds_number", 1e6),
+            density=parameters.get("density", 0.38),
+            beta=parameters.get("beta", 0.0),
+            height_agl=parameters.get("height_agl", 8000.0),
+            omega=parameters.get("omega"),
+        )
+    elif analysis_type == "aerostruct":
+        return build_aerostruct_problem(
+            surfaces=restored,
+            velocity=parameters.get("velocity", 248.136),
+            alpha=parameters.get("alpha", 5.0),
+            Mach_number=parameters.get("Mach_number", 0.84),
+            reynolds_number=parameters.get("reynolds_number", 1e6),
+            density=parameters.get("density", 0.38),
+            W0=parameters.get("W0", 0.4 * 3e5),
+            R=parameters.get("R", 11.165e6),
+            speed_of_sound=parameters.get("speed_of_sound", 295.4),
+            load_factor=parameters.get("load_factor", 1.0),
+            beta=parameters.get("beta", 0.0),
+            height_agl=parameters.get("height_agl", 8000.0),
+            omega=parameters.get("omega"),
+        )
+    else:
+        raise ValueError(f"Cannot rebuild problem for analysis_type={analysis_type!r}")
+
+
+# ---------------------------------------------------------------------------
 # DV / constraint / objective path resolution
 # ---------------------------------------------------------------------------
 
